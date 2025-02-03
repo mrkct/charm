@@ -1,13 +1,41 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
 #include <ctype.h>
 #include <stdarg.h>
+#include "elf.h"
 
+#define MAX_SECTIONS        16
+#define SECTION_ALIGNMENT   4096
+#define ROUND_UP(x, y) (((x) + (y) - 1) & ~((y) - 1))
+#define HASH_SIZE           1024
 
+enum Opcode {
+    NOP, ADD, AND, B, BL, CMP, LDR, MOV, MUL, ORR, STR, SUB, SWI
+};
+struct SupportedInstruction {
+    enum Opcode opcode;
+    const char *name;
+    int argc;
+} SUPPORTED_INSTRUCTIONS[] = {
+    {NOP, "NOP", 0},
+    {ADD, "ADD", 3},
+    {AND, "AND", 3},
+    {B, "B",   1},
+    {BL, "BL",  1},
+    {CMP, "CMP", 2},
+    {LDR, "LDR", 2},
+    {MOV, "MOV", 2},
+    {MUL, "MUL", 3},
+    {ORR, "ORR", 3},
+    {STR, "STR", 2},
+    {SUB, "SUB", 3},
+    {SWI, "SWI", 1}
+};
 
 //////////// UTILS ///////////////
 
@@ -21,6 +49,88 @@ static void *mustmalloc(size_t size)
         exit(1);
     }
     return ptr;
+}
+
+static void *mustrealloc(void *ptr, size_t size)
+{
+    void *new_ptr = realloc(ptr, size);
+    if (new_ptr == NULL) {
+        fprintf(stderr, "Error: Out of memory\n");
+        exit(1);
+    }
+    return new_ptr;
+}
+
+struct HashTableEntry {
+    const char *key;
+    uintptr_t value;
+    struct HashTableEntry *next;
+};
+
+struct HashMap {
+    struct HashTableEntry *entries[HASH_SIZE];
+};
+
+static uint32_t hash(const char *str)
+{
+    uint32_t hash = 5381;
+    int c;
+    while ((c = *str++))
+        hash = ((hash << 5) + hash) + c;
+    return hash % HASH_SIZE;
+}
+
+static bool hashmap_get(struct HashMap *table, const char *key, uintptr_t *value)
+{
+    uint32_t index = hash(key);
+    struct HashTableEntry *entry = table->entries[index];
+    while (entry) {
+        if (strcmp(entry->key, key) == 0) {
+            *value = entry->value;
+            return true;
+        }
+        entry = entry->next;
+    }
+    return false;
+}
+
+static void hashmap_insert(struct HashMap *table, const char *key, uintptr_t value)
+{
+    // This assumes that the key was not already in the table
+    uint32_t index = hash(key);
+    struct HashTableEntry *entry = mustmalloc(sizeof(struct HashTableEntry));
+    entry->key = key;
+    entry->value = value;
+    entry->next = table->entries[index];
+    table->entries[index] = entry;
+}
+
+static bool hashmap_contains(struct HashMap *table, const char *key)
+{
+    uintptr_t useless;
+    return hashmap_get(table, key, &useless);
+}
+
+static struct HashMap *hashmap_alloc()
+{
+    struct HashMap *table = mustmalloc(sizeof(struct HashMap));
+    for (size_t i = 0; i < HASH_SIZE; i++)
+        table->entries[i] = NULL;
+    return table;
+}
+
+static void hashmap_free(struct HashMap *table)
+{
+    for (size_t i = 0; i < HASH_SIZE; i++) {
+        struct HashTableEntry *entry = table->entries[i];
+        while (entry) {
+            struct HashTableEntry *next = entry->next;
+            free((void*) entry->key);
+            free(entry);
+            entry = next;
+        }
+    }
+    free(table);
 }
 
 //////////// ARG PARSING ////////////
@@ -77,17 +187,13 @@ static void read_file(const char *path, char **contents)
 
 //////////// CODE GENERATION ////////////
 
-enum Opcode {
-    NOP, ADD, MOV, B
-};
-
 //////////// CODE PARSING ////////////
 
 static bool emit_error(int lineidx, const char *fmt, ...)
 {
     va_list args;
     va_start(args, fmt);
-    fprintf(stderr, "Error, at line %d\n", lineidx);
+    fprintf(stderr, "\033[1;31merror, at line %d\033[0m: ", lineidx);
     vfprintf(stderr, fmt, args);
     fprintf(stderr, "\n");
     va_end(args);
@@ -207,7 +313,8 @@ static bool consume_integer(const char **line, int *integer)
     }
 
     while (isdigit(*start) || (base == 16 && isxdigit(*start))) {
-        int digit = isdigit(*start) ? *start - '0' : toupper(*start) - 'A' + 10;
+        int digit = isdigit(*start) ?
+            *start - '0' : toupper(*start) - 'A' + 10;
         value = value * base + digit;
         start++;
         parsed_digits++;
@@ -234,33 +341,54 @@ struct OpcodeArg {
     };
 };
 
-struct ParsedProgram {
-    size_t sections_length;
-    struct Section {
-        const char *name;
-        union {
-            unsigned read: 1;
-            unsigned write: 1;
-            unsigned exec: 1;
-        } flags;
-
-        struct Item {
-            enum { INSTRUCTION, DATA } type;
-            union {
-                struct Instruction {
-                    enum Opcode opcode;
-                    size_t argc;
-                    struct OpcodeArg args[4];
-                } instruction;
-                struct DataBlock {
-                    uint8_t *data;
-                    size_t length;
-                } data;
-            };
-        } *items;
-        size_t items_length;
-    } *sections;
+struct Instruction {
+    enum Opcode opcode;
+    size_t argc;
+    struct OpcodeArg args[4];
 };
+
+struct Item {
+    enum { INSTRUCTION, DATA } type;
+    size_t length;
+    union {
+        struct Instruction instruction;
+        const uint8_t *data;
+    };
+};
+
+struct Section {
+    const char *name;
+    uintptr_t start;
+    size_t size;
+    union {
+        unsigned allocable: 1;
+        unsigned read: 1;
+        unsigned write: 1;
+        unsigned exec: 1;
+    } flags;
+
+    struct Item *items;
+    size_t items_length, items_capacity;
+};
+
+struct ParsedProgram {
+    struct HashMap *labels;
+    struct Section sections[MAX_SECTIONS];
+    size_t sections_length;
+};
+
+static void push_item(struct ParsedProgram *program, struct Item item)
+{
+    struct Section *section = &program->sections[program->sections_length - 1];
+    if (section->items_length == section->items_capacity) {
+        section->items_capacity = section->items_capacity ?
+            section->items_capacity * 2 : 1;
+        section->items = mustrealloc(section->items,
+            section->items_capacity * sizeof(*section->items));
+    }
+    section->items[section->items_length++] = item;
+    section->size += ROUND_UP(item.length, 4);
+}
 
 static bool parse_section(int lineidx, const char *line, struct ParsedProgram *program)
 {
@@ -273,7 +401,8 @@ static bool parse_section(int lineidx, const char *line, struct ParsedProgram *p
     line = skip_whitespace(line);
 
     if (!consume_identifier(&line, &section_name)) {
-        emit_error(lineidx, "Expected section name, found '%s' instead", line);
+        emit_error(lineidx,
+            "Expected section name, found '%s' instead", line);
         goto parse_failed;
     }
 
@@ -283,23 +412,35 @@ static bool parse_section(int lineidx, const char *line, struct ParsedProgram *p
     line = skip_whitespace(line);
 
     if (!consume_string(&line, &flags)) {
-        emit_error(lineidx, "Expected section flags (eg: \"arx\"), found '%s' instead", line);
+        emit_error(lineidx,
+            "Expected section flags (eg: \"arx\"), "
+            "found '%s' instead", line);
         goto parse_failed;
     }
 
+    if (program->sections_length == MAX_SECTIONS) {
+        emit_error(lineidx, "Too many sections");
+        goto parse_failed;
+    }
+
+    struct Section *prev_section = &program->sections[program->sections_length - 1];
+    struct Section *section = &program->sections[program->sections_length++];
+    section->name = section_name;
+    section->start = ROUND_UP(prev_section->size, SECTION_ALIGNMENT);
+    section->size = 0;
     for (const char *flag = flags; *flag; flag++) {
         switch (*flag) {
         case 'a':
-            // section->flags.allocatable = 1;
+            section->flags.allocable = 1;
             break;
         case 'r':
-            // section->flags.read = 1;
+            section->flags.read = 1;
             break;
         case 'w':
-            // section->flags.write = 1;
+            section->flags.write = 1;
             break;
         case 'x':
-            // section->flags.exec = 1;
+            section->flags.exec = 1;
             break;
         default:
             emit_error(lineidx, "Invalid flag: %c", *flag);
@@ -307,6 +448,9 @@ static bool parse_section(int lineidx, const char *line, struct ParsedProgram *p
         }
     }
     free(flags);
+    section->items = NULL;
+    section->items_length = 0;
+    section->items_capacity = 0;
 
     return true;
 
@@ -316,7 +460,10 @@ parse_failed:
     return false;
 }
 
-static bool parse_asciiz(int lineidx, const char *line, struct ParsedProgram *program)
+static bool parse_asciiz(
+    int lineidx, 
+    const char *line, 
+    struct ParsedProgram *program)
 {
     char *string = NULL;
 
@@ -329,7 +476,12 @@ static bool parse_asciiz(int lineidx, const char *line, struct ParsedProgram *pr
         goto parse_failed;
     }
 
-    /* TODO: Push the string into the current section */
+    struct Item item = {
+        .type = DATA,
+        .length = strlen(string) + 1,
+        .data = (uint8_t*) string
+    };
+    push_item(program, item);
 
     return true;
 
@@ -338,7 +490,10 @@ parse_failed:
     return false;
 }
 
-static bool parse_preprocessor_directive(int lineidx, const char *line, struct ParsedProgram *program)
+static bool parse_preprocessor_directive(
+    int lineidx,
+    const char *line,
+    struct ParsedProgram *program)
 {
     line = skip_whitespace(line);
     if (!consume(&line, "."))
@@ -354,7 +509,7 @@ parse_failed:
     return false;
 }
 
-static bool parse_label_decl(const char *line, struct ParsedProgram *program)
+static bool parse_label_decl(int lineidx, const char *line, struct ParsedProgram *program)
 {
     char *label = NULL;
 
@@ -364,7 +519,12 @@ static bool parse_label_decl(const char *line, struct ParsedProgram *program)
     if (!consume(&line, ":"))
         goto parse_failed;
 
-    /* TODO: Create entry in the label table*/
+    struct Section *section = &program->sections[program->sections_length - 1];
+    if (hashmap_contains(program->labels, label)) {
+        emit_error(lineidx, "Duplicate label '%s'", label);
+        goto parse_failed;
+    }
+    hashmap_insert(program->labels, label, section->start + section->size);
     return true;
 
 parse_failed:
@@ -436,7 +596,7 @@ static bool parse_immediate_value_arg(int lineidx, const char **line, struct Opc
         goto parse_failed;
     }
 
-    if (*temp != '\0') {
+    if (*temp != '\0' && !isspace(*temp)) {
         emit_error(lineidx, "Unexpected character after integer");
         goto parse_failed;
     }
@@ -448,26 +608,26 @@ parse_failed:
     return false;
 }
 
-static bool parse_opcode_arg(int lineidx, const char *line, struct OpcodeArg *arg)
+static bool parse_opcode_arg(int lineidx, const char **line, struct OpcodeArg *arg)
 {
-    line = skip_whitespace(line);
     return (
-        parse_register_arg(&line, arg) ||
-        parse_label_arg(&line, arg) ||
-        parse_immediate_value_arg(lineidx, &line, arg)
+        parse_register_arg(line, arg) ||
+        parse_label_arg(line, arg) ||
+        parse_immediate_value_arg(lineidx, line, arg)
     );
 }
 
 static bool parse_instruction(int lineidx, const char *line, struct ParsedProgram *program)
 {
-    struct OpcodeArg args[4];
+    struct OpcodeArg args[4] = { 0 };
     int argc = 0;
     char *instruction_name = NULL;
 
     if (!consume_identifier(&line, &instruction_name))
         goto parse_failed;
 
-    if (parse_opcode_arg(lineidx, line, &args[argc])) {
+    line = skip_whitespace(line);
+    if (parse_opcode_arg(lineidx, &line, &args[argc])) {
         argc++;
 
         line = skip_whitespace(line);
@@ -477,8 +637,8 @@ static bool parse_instruction(int lineidx, const char *line, struct ParsedProgra
                 goto parse_failed;
             }
 
-            
-            if (!parse_opcode_arg(lineidx, line, &args[argc])) {
+            line = skip_whitespace(line);
+            if (!parse_opcode_arg(lineidx, &line, &args[argc])) {
                 emit_error(lineidx, "Failed to parse an argument after ','");
                 goto parse_failed;
             }
@@ -487,10 +647,37 @@ static bool parse_instruction(int lineidx, const char *line, struct ParsedProgra
         }
     }
 
-    /* TODO: Check that the instruction is valid */
-    /* TODO: Check that the argument count is correct */
-    /* TODO: Convert the instruction to enum Opcode*/
-    /* TODO: Push the instruction into the current section */
+    size_t idx;
+    for (idx = 0; idx < ARRAY_SIZE(SUPPORTED_INSTRUCTIONS); idx++) {
+        if (strcasecmp(instruction_name, SUPPORTED_INSTRUCTIONS[idx].name) == 0)
+            break;
+    }
+    if (idx == ARRAY_SIZE(SUPPORTED_INSTRUCTIONS)) {
+        emit_error(lineidx, "Unknown instruction '%s'", instruction_name);
+        goto parse_failed;
+    } else if (argc != SUPPORTED_INSTRUCTIONS[idx].argc) {
+        emit_error(lineidx,
+            "Invalid number of arguments for instruction '%s' "
+            "(expected %d, found %d)", instruction_name,
+            SUPPORTED_INSTRUCTIONS[idx].argc, argc);
+        goto parse_failed;
+    }
+    
+    struct Item item = {
+        .type = INSTRUCTION,
+        .length = 4,
+        .instruction = {
+            .opcode = SUPPORTED_INSTRUCTIONS[idx].opcode,
+            .args = {
+                [0] = args[0],
+                [1] = args[1],
+                [2] = args[2],
+                [3] = args[3],
+            }
+        }
+    };
+    push_item(program, item);
+    free(instruction_name);
 
     return true;
 
@@ -501,15 +688,22 @@ parse_failed:
 
 static bool parse_line(int lineidx, char *line, struct ParsedProgram *program)
 {
-    // Trim leading whitespace
-    while (*line && isspace(*line))
-        line++;
-    // Trim trailing whitespace and comments
-    line[strcspn(line, "#\r\n")] = '\0';
+    // Trim comments
+    for (char *c = line; *c && *(c + 1); c++) {
+        if (*c == '/' && *(c + 1) == '/') {
+            *c = '\0';
+            break;
+        }
+    }
+
+    // Empty lines are not an error
+    line = (char*) skip_whitespace(line);
+    if (*line == '\0')
+        return true;
 
     return (
         parse_preprocessor_directive(lineidx, line, program) ||
-        parse_label_decl(line, program) ||
+        parse_label_decl(lineidx, line, program) ||
         parse_instruction(lineidx, line, program)
     );
 }
@@ -517,8 +711,26 @@ static bool parse_line(int lineidx, char *line, struct ParsedProgram *program)
 static bool parse_program(char *source, struct ParsedProgram *program)
 {
     bool parsing_failed = false;
+    char *line = NULL;
 
-    char *line = source;
+    program->labels = hashmap_alloc();
+    program->sections_length = 1;
+
+    struct Section *s = &program->sections[0];
+    char *name = mustmalloc(strlen("default") + 1);
+    strcpy(name, "default");
+    s->name = name;
+    s->start = 0,
+    s->size = 0,
+    s->flags.allocable = 1;
+    s->flags.read = 1;
+    s->flags.write = 0;
+    s->flags.exec = 1;
+    s->items = NULL;
+    s->items_length = 0;
+    s->items_capacity = 0;
+
+    line = source;
     for (int lineidx = 0; line != NULL; lineidx++) {
         char *nextline = line;
         while (*nextline && *nextline != '\n')
@@ -531,13 +743,50 @@ static bool parse_program(char *source, struct ParsedProgram *program)
             nextline = NULL;
         }
 
-        printf("% 3d: %s\n", lineidx, line);
-        parsing_failed |= parse_line(lineidx, line, program);
+        if (!parse_line(lineidx, line, program)) {
+            parsing_failed = true;
+            fprintf(stderr, "% 5d | %s\n", lineidx, line);
+        }
 
         line = nextline;
     }
 
     return !parsing_failed;
+}
+
+static void free_program(struct ParsedProgram *program)
+{
+    size_t idx;
+    for (idx = 0; idx < program->sections_length; idx++) {
+        struct Section *section = &program->sections[idx];
+        
+        for (size_t i = 0; i < section->items_length; i++) {
+            struct Item item = section->items[i];
+            switch (item.type) {
+            case DATA:
+                free((void*) item.data);
+                break;
+            case INSTRUCTION:
+                for (size_t j = 0; j < ARRAY_SIZE(item.instruction.args); j++) {
+                    struct OpcodeArg *arg = &item.instruction.args[j];
+                    switch (arg->type) {
+                    case REGISTER:
+                        break;
+                    case IMMEDIATE:
+                        break;
+                    case LABEL:
+                        free((void*) arg->label);
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+        
+        free((void*) section->name);
+        free(section->items);
+    }
+    hashmap_free(program->labels);
 }
 
 int main(int argc, char *argv[])
@@ -553,6 +802,7 @@ int main(int argc, char *argv[])
         exit(-1);
 
     free(source);
+    free_program(&program);
 
     return 0;
 }
