@@ -557,10 +557,12 @@ static bool parse_register_arg(const char **line, struct OpcodeArg *arg)
             break;
         }
     }
+    if (!found)
+        goto parse_failed;
 
     *line = start;
     free(iden);
-    return found;
+    return true;
 
 parse_failed:
     free(iden);
@@ -831,7 +833,7 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
                 return false;
             }
 
-            jump = (int64_t) addr - pc - 4;
+            jump = (int64_t) addr - pc;
             if (jump <= -0x2000000 || jump > 0x1ffffc) {
                 emit_error(-1, "Branch out of range: %s", item->instruction.args[0].label);
                 return false;
@@ -841,7 +843,7 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             if (item->instruction.opcode == BL)
                 *instruction |= 1 << 24;
             *instruction |= cond_always;
-            *instruction |= (uint32_t) jump;
+            *instruction |= ((uint32_t) jump >> 2) & 0xffffff;
             break;
         }
         case CMP: {
