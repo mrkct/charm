@@ -1,1 +1,4 @@
 charm
+*.actual
+*.expected
+*.elf

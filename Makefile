@@ -1,4 +1,4 @@
-CFLAGS = -Wall -Wextra -O0 -g -std=c11 -pedantic 
+CFLAGS = -Wall -Wextra -O0 -g -std=c2x -pedantic 
 ifeq ($(ENABLE_SANITIZERS), 1)
 	CFLAGS += -fsanitize=address \
 		-fsanitize=undefined -fsanitize=leak \
@@ -20,22 +20,19 @@ charm: charm.c
 	$(CC) $(CFLAGS) charm.c -o charm
 
 quick-test: charm
-	./charm sample.S sample.elf
+	./charm sample.S sample.obj
 
 gdb-quick-test: charm
-	gdb -tui charm -- sample.S sample.elf
+	gdb -tui charm -- sample.S sample.obj
 
 test: charm
-	@echo "Running tests..."
-	@for test in $(wildcard tests/*.S); do \
-		expected=$${test%.S}.expected; \
-		echo "Testing $${test}..."; \
-		./charm < $$test > test_output.txt; \
-		diff test_output.txt $$expected && echo "✓ Passed" || echo "✗ Failed"; \
-	done
+	./run-tests.sh
 
 clean:
 	$(RM) -f charm.c.o
 	$(RM) -f charm
+	$(RM) -f tests/*.elf
+	$(RM) -f tests/*.actual
+	$(RM) -f tests/*.expected
 
 .PHONY: clean

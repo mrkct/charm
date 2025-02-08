@@ -1,0 +1,21 @@
+.section .text, "ax"
+_start:
+    mov r0, r0
+    mov r1, r1
+    mov r2, r2
+    mov r3, r3
+    mov r4, r4
+    mov r5, r5
+    mov r6, r6
+    mov r7, r7
+    mov r8, r8
+    mov r9, r9
+    mov r10, r10
+    mov r11, r11
+    mov r12, r12
+    mov r13, r13
+    mov r14, r14
+    mov r15, r15
+    mov sp, sp
+    mov lr, lr
+    mov pc, pc

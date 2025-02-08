@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,6 +8,8 @@
 #include <stdbool.h>
 #include <ctype.h>
 #include <stdarg.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include "elf.h"
 
 #define MAX_SECTIONS        16
@@ -15,14 +18,13 @@
 #define HASH_SIZE           1024
 
 enum Opcode {
-    NOP, ADD, AND, B, BL, CMP, LDR, MOV, MUL, ORR, STR, SUB, SWI
+    ADD, AND, B, BL, CMP, LDR, MOV, MUL, ORR, STR, SUB, SWI
 };
 struct SupportedInstruction {
     enum Opcode opcode;
     const char *name;
     int argc;
 } SUPPORTED_INSTRUCTIONS[] = {
-    {NOP, "NOP", 0},
     {ADD, "ADD", 3},
     {AND, "AND", 3},
     {B, "B",   1},
@@ -63,7 +65,7 @@ static void *mustrealloc(void *ptr, size_t size)
 
 struct HashTableEntry {
     const char *key;
-    uintptr_t value;
+    uint32_t value;
     struct HashTableEntry *next;
 };
 
@@ -80,7 +82,7 @@ static uint32_t hash(const char *str)
     return hash % HASH_SIZE;
 }
 
-static bool hashmap_get(struct HashMap *table, const char *key, uintptr_t *value)
+static bool hashmap_get(struct HashMap *table, const char *key, uint32_t *value)
 {
     uint32_t index = hash(key);
     struct HashTableEntry *entry = table->entries[index];
@@ -94,7 +96,7 @@ static bool hashmap_get(struct HashMap *table, const char *key, uintptr_t *value
     return false;
 }
 
-static void hashmap_insert(struct HashMap *table, const char *key, uintptr_t value)
+static void hashmap_insert(struct HashMap *table, const char *key, uint32_t value)
 {
     // This assumes that the key was not already in the table
     uint32_t index = hash(key);
@@ -107,7 +109,7 @@ static void hashmap_insert(struct HashMap *table, const char *key, uintptr_t val
 
 static bool hashmap_contains(struct HashMap *table, const char *key)
 {
-    uintptr_t useless;
+    uint32_t useless;
     return hashmap_get(table, key, &useless);
 }
 
@@ -184,8 +186,6 @@ static void read_file(const char *path, char **contents)
     (*contents)[file_size] = '\0';
     fclose(file);
 }
-
-//////////// CODE GENERATION ////////////
 
 //////////// CODE PARSING ////////////
 
@@ -358,7 +358,7 @@ struct Item {
 
 struct Section {
     const char *name;
-    uintptr_t start;
+    uint32_t start;
     size_t size;
     union {
         unsigned allocable: 1;
@@ -789,6 +789,127 @@ static void free_program(struct ParsedProgram *program)
     hashmap_free(program->labels);
 }
 
+//////// CODE GENERATION ////////
+
+static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, struct Item *item, uint32_t *instruction)
+{
+#define cond_always     ((0b1110 & 0xf) << 28)
+#define opcode(n)       (((n) & 0x7f) << 21)
+#define Rn(n)           ((((n).register_index) & 0xf) << 16)
+#define Rm(n)           ((((n).register_index) & 0xf) << 0)
+#define Rd(n)           ((((n).register_index) & 0xf) << 12)
+
+    uint32_t addr;
+    
+
+    assert(item->type == INSTRUCTION);
+    switch (item->instruction.opcode) {
+        case ADD:
+            assert(item->instruction.args[0].type == IMMEDIATE || 
+                   item->instruction.args[0].type == REGISTER);
+            if (item->instruction.args[2].type == IMMEDIATE) {
+                *instruction = 0b00000010100000000000000000000000;
+                *instruction |= item->instruction.args[2].immediate & 0xfff;
+            } else {
+                *instruction = 0b00000000100000000000000000000000;
+                *instruction |= Rm(item->instruction.args[2]);
+            }
+            *instruction |= cond_always;
+            *instruction |= Rn(item->instruction.args[1]);
+            *instruction |= Rd(item->instruction.args[0]);
+            break;
+        case AND:
+            break;
+        case B:
+        case BL: {
+            assert(item->instruction.args[0].type == LABEL);
+            
+            int64_t jump = 0;
+            if (!hashmap_get(program->labels, item->instruction.args[0].label, &addr)) {
+                emit_error(-1, "Label not found: %s", item->instruction.args[0].label);
+                return false;
+            }
+
+            jump = (int64_t) addr - pc - 4;
+            if (jump <= -0x2000000 || jump > 0x1ffffc) {
+                emit_error(-1, "Branch out of range: %s", item->instruction.args[0].label);
+                return false;
+            }
+
+            *instruction = 0b00001010000000000000000000000000;
+            if (item->instruction.opcode == BL)
+                *instruction |= 1 << 24;
+            *instruction |= cond_always;
+            *instruction |= (uint32_t) jump;
+            break;
+        }
+        case CMP: {
+
+            break;
+        }
+        case LDR:
+            break;
+        case MOV:
+            assert(item->instruction.args[0].type == REGISTER);
+            assert(item->instruction.args[1].type == IMMEDIATE ||
+                   item->instruction.args[1].type == REGISTER);
+            *instruction = 0b00000001101000000000000000000000;
+            *instruction |= cond_always;
+            *instruction |= Rd(item->instruction.args[0]);
+            if (item->instruction.args[1].type == IMMEDIATE) {
+                *instruction |= 1 << 25;
+                *instruction |= item->instruction.args[1].immediate & 0xfff;
+            } else {
+                *instruction |= Rm(item->instruction.args[1]);
+            }
+            break;
+        case MUL:
+            break;
+        case ORR:
+            break;
+        case STR:
+            break;
+        case SUB:
+            break;
+        case SWI:
+            assert(item->instruction.args[0].type == IMMEDIATE);
+            *instruction = 0b00001111000000000000000000000000;
+            *instruction |= cond_always;
+            *instruction |= item->instruction.args[0].immediate & 0xffffff;
+            break;
+    }
+
+    return true;
+}
+
+static bool codegen_obj(struct ParsedProgram *program, int fd)
+{
+    uint32_t instruction = 0;
+    bool codegen_failed = false;
+
+    for (size_t i = 0; i < program->sections_length; i++) {
+        struct Section *section = &program->sections[i];
+        uint32_t addr = section->start;
+        for (size_t j = 0; j < section->items_length; j++) {
+            struct Item item = section->items[j];
+            switch (item.type) {
+            case DATA:
+                write(fd, item.data, item.length);
+                addr += item.length;
+                break;
+            case INSTRUCTION:
+                // pc is always 8 bytes ahead
+                codegen_failed |= codegen_instruction(program, addr + 8, &item, &instruction);
+                write(fd, (uint8_t*) &instruction, sizeof(instruction));
+                addr += item.length;
+                break;
+            }
+        }
+    }
+
+    return codegen_failed;
+}
+
 int main(int argc, char *argv[])
 {
     struct Args arguments;
@@ -800,6 +921,11 @@ int main(int argc, char *argv[])
 
     if (!parse_program(source, &program))
         exit(-1);
+
+    int fd = open(arguments.output_file_path, O_WRONLY | O_CREAT, 0644);
+    if (!codegen_obj(&program, fd))
+        exit(-1);
+    close(fd);
 
     free(source);
     free_program(&program);
