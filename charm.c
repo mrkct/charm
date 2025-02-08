@@ -798,6 +798,7 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
 {
 #define cond_always     (((uint32_t) 0b1110 & 0xf) << 28)
 #define opcode(n)       (((n) & 0x7f) << 21)
+#define immediate_bit   ((uint32_t) 1 << 25)
 #define Rn(n)           ((((n).register_index) & 0xf) << 16)
 #define Rm(n)           ((((n).register_index) & 0xf) << 0)
 #define Rd(n)           ((((n).register_index) & 0xf) << 12)
@@ -810,16 +811,17 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
         case ADD:
             assert(item->instruction.args[0].type == IMMEDIATE || 
                    item->instruction.args[0].type == REGISTER);
-            if (item->instruction.args[2].type == IMMEDIATE) {
-                *instruction = 0b00000010100000000000000000000000;
-                *instruction |= item->instruction.args[2].immediate & 0xfff;
-            } else {
-                *instruction = 0b00000000100000000000000000000000;
-                *instruction |= Rm(item->instruction.args[2]);
-            }
+
+            *instruction = 0b00000000100000000000000000000000;
             *instruction |= cond_always;
             *instruction |= Rn(item->instruction.args[1]);
             *instruction |= Rd(item->instruction.args[0]);
+            if (item->instruction.args[2].type == IMMEDIATE) {
+                *instruction |= immediate_bit;
+                *instruction |= item->instruction.args[2].immediate & 0xfff;
+            } else {
+                *instruction |= Rm(item->instruction.args[2]);
+            }
             break;
         case AND:
             break;
@@ -847,7 +849,19 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             break;
         }
         case CMP: {
-
+            assert(item->instruction.args[0].type == REGISTER);
+            assert(item->instruction.args[1].type == REGISTER ||
+                   item->instruction.args[1].type == IMMEDIATE);
+            
+            *instruction = 0b00000001010100000000000000000000;
+            *instruction |= cond_always;
+            *instruction |= Rn(item->instruction.args[0]);
+            if (item->instruction.args[1].type == IMMEDIATE) {
+                *instruction |= immediate_bit;
+                *instruction |= item->instruction.args[1].immediate & 0xfff;
+            } else {
+                *instruction |= Rm(item->instruction.args[1]);
+            }
             break;
         }
         case LDR:
@@ -856,11 +870,12 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             assert(item->instruction.args[0].type == REGISTER);
             assert(item->instruction.args[1].type == IMMEDIATE ||
                    item->instruction.args[1].type == REGISTER);
+
             *instruction = 0b00000001101000000000000000000000;
             *instruction |= cond_always;
             *instruction |= Rd(item->instruction.args[0]);
             if (item->instruction.args[1].type == IMMEDIATE) {
-                *instruction |= 1 << 25;
+                *instruction |= immediate_bit;
                 *instruction |= item->instruction.args[1].immediate & 0xfff;
             } else {
                 *instruction |= Rm(item->instruction.args[1]);
@@ -876,6 +891,7 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             break;
         case SWI:
             assert(item->instruction.args[0].type == IMMEDIATE);
+
             *instruction = 0b00001111000000000000000000000000;
             *instruction |= cond_always;
             *instruction |= item->instruction.args[0].immediate & 0xffffff;
