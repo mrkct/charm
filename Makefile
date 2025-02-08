@@ -1,4 +1,5 @@
 CFLAGS = -Wall -Wextra -O0 -g -std=c2x -pedantic 
+ENABLE_SANITIZERS ?= 1
 ifeq ($(ENABLE_SANITIZERS), 1)
 	CFLAGS += -fsanitize=address \
 		-fsanitize=undefined -fsanitize=leak \
@@ -14,16 +15,12 @@ ifeq ($(ENABLE_SANITIZERS), 1)
 		-fsanitize=integer-divide-by-zero -fsanitize=pointer-overflow
 endif
 
-all: charm test
+build: charm
+all: charm
+.PHONY: all build clean test
 
 charm: charm.c
 	$(CC) $(CFLAGS) charm.c -o charm
-
-quick-test: charm
-	./charm sample.S sample.obj
-
-gdb-quick-test: charm
-	gdb -tui charm -- sample.S sample.obj
 
 test: charm
 	./run-tests.sh
@@ -34,5 +31,3 @@ clean:
 	$(RM) -f tests/*.elf
 	$(RM) -f tests/*.actual
 	$(RM) -f tests/*.expected
-
-.PHONY: clean

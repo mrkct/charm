@@ -36,7 +36,8 @@ struct SupportedInstruction {
     {ORR, "ORR", 3},
     {STR, "STR", 2},
     {SUB, "SUB", 3},
-    {SWI, "SWI", 1}
+    {SWI, "SWI", 1},
+    {SWI, "SVC", 1}, // SVC is the same as SWI
 };
 
 //////////// UTILS ///////////////
@@ -335,8 +336,8 @@ static bool consume_integer(const char **line, int *integer)
 struct OpcodeArg {
     enum { REGISTER, IMMEDIATE, LABEL } type;
     union {
-        int register_index;
-        int immediate;
+        uint32_t register_index;
+        int32_t immediate;
         const char *label;
     };
 };
@@ -793,7 +794,7 @@ static void free_program(struct ParsedProgram *program)
 
 static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, struct Item *item, uint32_t *instruction)
 {
-#define cond_always     ((0b1110 & 0xf) << 28)
+#define cond_always     (((uint32_t) 0b1110 & 0xf) << 28)
 #define opcode(n)       (((n) & 0x7f) << 21)
 #define Rn(n)           ((((n).register_index) & 0xf) << 16)
 #define Rm(n)           ((((n).register_index) & 0xf) << 0)
