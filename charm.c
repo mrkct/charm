@@ -990,7 +990,7 @@ static bool codegen_obj(struct ParsedProgram *program, int fd)
                 break;
             case INSTRUCTION:
                 // pc is always 8 bytes ahead
-                codegen_failed |= codegen_instruction(program, addr + 8, &item, &instruction);
+                codegen_failed |= !codegen_instruction(program, addr + 8, &item, &instruction);
                 write(fd, (uint8_t*) &instruction, sizeof(instruction));
                 addr += item.length;
                 break;
@@ -998,7 +998,7 @@ static bool codegen_obj(struct ParsedProgram *program, int fd)
         }
     }
 
-    return codegen_failed;
+    return !codegen_failed;
 }
 
 int main(int argc, char *argv[])
