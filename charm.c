@@ -483,6 +483,30 @@ parse_failed:
     return false;
 }
 
+static bool parse_global(int lineidx, const char *line)
+{
+    char *label = NULL;
+
+    /* We don't do anything with .global statements, we only parse them to
+       ignore them because they're present in inputs */
+
+    if (!consume(&line, "global"))
+        goto parse_failed;
+
+    line = skip_whitespace(line);
+    if (!consume_identifier(&line, &label)) {
+        emit_error(lineidx, "Expected label name, found '%s' instead", line);
+        goto parse_failed;
+    }
+    
+    free(label);
+    return true;
+
+parse_failed:
+    free(label);
+    return false;
+}
+
 static bool parse_asciiz(
     int lineidx, 
     const char *line, 
@@ -525,6 +549,7 @@ static bool parse_preprocessor_directive(
     return (
         parse_section(lineidx, line, program) ||
         parse_asciiz(lineidx, line, program) ||
+        parse_global(lineidx, line) ||
         emit_error(lineidx, "Unknown preprocessor directive: %s", line)
     );
 
