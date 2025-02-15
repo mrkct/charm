@@ -507,15 +507,21 @@ parse_failed:
     return false;
 }
 
-static bool parse_asciiz(
+static bool parse_ascii(
     int lineidx, 
     const char *line, 
     struct ParsedProgram *program)
 {
     char *string = NULL;
+    bool include_zero_term = true;
 
-    if (!consume(&line, "asciiz"))
+    if (consume(&line, "ascii")) {
+        include_zero_term = false;
+    } else if (consume(&line, "asciz") || consume(&line, "string")) {
+        include_zero_term = true;
+    } else {
         goto parse_failed;
+    }
     line = skip_whitespace(line);
 
     if (!consume_string(&line, &string)) {
@@ -525,7 +531,7 @@ static bool parse_asciiz(
 
     struct Item item = {
         .type = DATA,
-        .length = strlen(string) + 1,
+        .length = strlen(string) + (include_zero_term ? 1 : 0),
         .data = (uint8_t*) string
     };
     push_item(program, item);
@@ -548,7 +554,7 @@ static bool parse_preprocessor_directive(
 
     return (
         parse_section(lineidx, line, program) ||
-        parse_asciiz(lineidx, line, program) ||
+        parse_ascii(lineidx, line, program) ||
         parse_global(lineidx, line) ||
         emit_error(lineidx, "Unknown preprocessor directive: %s", line)
     );
