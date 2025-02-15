@@ -39,6 +39,27 @@ struct SupportedInstruction {
     {SWI, "SWI", 1},
     {SWI, "SVC", 1}, // SVC is the same as SWI
 };
+struct {
+    const char *name;
+    uint32_t value;
+} CONDITIONAL_EXECUTION_SUFFIXES[] = {
+    {"EQ", 0b0000},
+    {"NE", 0b0001},
+    {"CS", 0b0010},
+    {"CC", 0b0011},
+    {"MI", 0b0100}, 
+    {"PL", 0b0101},
+    {"VS", 0b0110},
+    {"VC", 0b0111},
+    {"HI", 0b1000},
+    {"LS", 0b1001},
+    {"GE", 0b1010},
+    {"LT", 0b1011},
+    {"GT", 0b1100},
+    {"LE", 0b1101},
+#define COND_ALWAYS 0b1110
+    {"AL", 0b1110},
+};
 
 //////////// UTILS ///////////////
 
@@ -343,6 +364,7 @@ struct OpcodeArg {
 };
 
 struct Instruction {
+    uint32_t condition_flag;
     enum Opcode opcode;
     size_t argc;
     struct OpcodeArg args[4];
@@ -620,11 +642,40 @@ static bool parse_opcode_arg(int lineidx, const char **line, struct OpcodeArg *a
     );
 }
 
+static bool parse_mnemonic(const char *mnemonic, struct SupportedInstruction **instruction, uint32_t *condition_flag)
+{
+    for (size_t i = 0; i < ARRAY_SIZE(SUPPORTED_INSTRUCTIONS); i++) {
+        size_t instr_len = strlen(SUPPORTED_INSTRUCTIONS[i].name);
+
+        if (strncasecmp(mnemonic, SUPPORTED_INSTRUCTIONS[i].name, instr_len) == 0) {
+            *instruction = &SUPPORTED_INSTRUCTIONS[i];
+
+            if (mnemonic[instr_len] == '\0') {
+                *condition_flag = COND_ALWAYS;
+                return true;
+            }
+
+            // Check for condition suffix
+            const char *suffix = mnemonic + instr_len;
+            for (size_t j = 0; j < ARRAY_SIZE(CONDITIONAL_EXECUTION_SUFFIXES); j++) {
+                if (strcasecmp(suffix, CONDITIONAL_EXECUTION_SUFFIXES[j].name) == 0) {
+                    *condition_flag = CONDITIONAL_EXECUTION_SUFFIXES[j].value;
+                    return true;
+                }
+            }
+        }        
+    }
+
+    return false;
+}
+
 static bool parse_instruction(int lineidx, const char *line, struct ParsedProgram *program)
 {
     struct OpcodeArg args[4] = { 0 };
     int argc = 0;
     char *instruction_name = NULL;
+    uint32_t condition_flag = 0;
+    struct SupportedInstruction *instruction = NULL;
 
     if (!consume_identifier(&line, &instruction_name))
         goto parse_failed;
@@ -650,19 +701,14 @@ static bool parse_instruction(int lineidx, const char *line, struct ParsedProgra
         }
     }
 
-    size_t idx;
-    for (idx = 0; idx < ARRAY_SIZE(SUPPORTED_INSTRUCTIONS); idx++) {
-        if (strcasecmp(instruction_name, SUPPORTED_INSTRUCTIONS[idx].name) == 0)
-            break;
-    }
-    if (idx == ARRAY_SIZE(SUPPORTED_INSTRUCTIONS)) {
+    if (!parse_mnemonic(instruction_name, &instruction, &condition_flag)) {
         emit_error(lineidx, "Unknown instruction '%s'", instruction_name);
         goto parse_failed;
-    } else if (argc != SUPPORTED_INSTRUCTIONS[idx].argc) {
+    } else if (argc != instruction->argc) {
         emit_error(lineidx,
             "Invalid number of arguments for instruction '%s' "
             "(expected %d, found %d)", instruction_name,
-            SUPPORTED_INSTRUCTIONS[idx].argc, argc);
+            instruction->argc, argc);
         goto parse_failed;
     }
     
@@ -670,7 +716,8 @@ static bool parse_instruction(int lineidx, const char *line, struct ParsedProgra
         .type = INSTRUCTION,
         .length = 4,
         .instruction = {
-            .opcode = SUPPORTED_INSTRUCTIONS[idx].opcode,
+            .condition_flag = condition_flag,
+            .opcode = instruction->opcode,
             .args = {
                 [0] = args[0],
                 [1] = args[1],
@@ -796,7 +843,6 @@ static void free_program(struct ParsedProgram *program)
 
 static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, struct Item *item, uint32_t *instruction)
 {
-#define cond_always     (((uint32_t) 0b1110 & 0xf) << 28)
 #define opcode(n)       (((n) & 0x7f) << 21)
 #define immediate_bit   ((uint32_t) 1 << 25)
 #define Rn(n)           ((((n).register_index) & 0xf) << 16)
@@ -804,16 +850,17 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
 #define Rd(n)           ((((n).register_index) & 0xf) << 12)
 
     uint32_t addr;
-    
+    uint32_t conditional_execution_mask;
 
     assert(item->type == INSTRUCTION);
+    conditional_execution_mask = ((uint32_t) item->instruction.condition_flag) << 28;
     switch (item->instruction.opcode) {
         case ADD:
             assert(item->instruction.args[0].type == IMMEDIATE || 
                    item->instruction.args[0].type == REGISTER);
 
             *instruction = 0b00000000100000000000000000000000;
-            *instruction |= cond_always;
+            *instruction |= conditional_execution_mask;
             *instruction |= Rn(item->instruction.args[1]);
             *instruction |= Rd(item->instruction.args[0]);
             if (item->instruction.args[2].type == IMMEDIATE) {
@@ -844,7 +891,7 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             *instruction = 0b00001010000000000000000000000000;
             if (item->instruction.opcode == BL)
                 *instruction |= 1 << 24;
-            *instruction |= cond_always;
+            *instruction |= conditional_execution_mask;
             *instruction |= ((uint32_t) jump >> 2) & 0xffffff;
             break;
         }
@@ -854,7 +901,7 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
                    item->instruction.args[1].type == IMMEDIATE);
             
             *instruction = 0b00000001010100000000000000000000;
-            *instruction |= cond_always;
+            *instruction |= conditional_execution_mask;
             *instruction |= Rn(item->instruction.args[0]);
             if (item->instruction.args[1].type == IMMEDIATE) {
                 *instruction |= immediate_bit;
@@ -872,7 +919,7 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
                    item->instruction.args[1].type == REGISTER);
 
             *instruction = 0b00000001101000000000000000000000;
-            *instruction |= cond_always;
+            *instruction |= conditional_execution_mask;
             *instruction |= Rd(item->instruction.args[0]);
             if (item->instruction.args[1].type == IMMEDIATE) {
                 *instruction |= immediate_bit;
@@ -893,7 +940,7 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             assert(item->instruction.args[0].type == IMMEDIATE);
 
             *instruction = 0b00001111000000000000000000000000;
-            *instruction |= cond_always;
+            *instruction |= conditional_execution_mask;
             *instruction |= item->instruction.args[0].immediate & 0xffffff;
             break;
     }
