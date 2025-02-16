@@ -14,9 +14,21 @@
 
 #define MAX_SECTIONS        16
 #define SECTION_ALIGNMENT   4096
-#define ROUND_UP(x, y) (((x) + (y) - 1) & ~((y) - 1))
+#define ROUND_UP(x, y)      (((x) + (y) - 1) & ~((y) - 1))
 #define HASH_SIZE           1024
 
+enum OpcodeArgType {
+    REGISTER = 1 << 0,
+    IMMEDIATE = 1 << 1,
+    LABEL = 1 << 2,
+#define ARG(i, x)           ((x) << (3 * (i)))
+#define ARG0(x)             ARG(0, x)
+#define ARG1(x)             ARG(1, x)
+#define ARG2(x)             ARG(2, x)
+#define REG_OR_IMM          (REGISTER | IMMEDIATE)
+#define REG_OR_LABEL        (REGISTER | LABEL)
+#define REG_OR_IMM_OR_LABEL (REGISTER | IMMEDIATE | LABEL)
+};
 enum Opcode {
     ADD, AND, B, BL, CMP, LDR, MOV, MUL, ORR, STR, SUB, SWI
 };
@@ -24,20 +36,21 @@ struct SupportedInstruction {
     enum Opcode opcode;
     const char *name;
     int argc;
+    uint32_t argtypes;
 } SUPPORTED_INSTRUCTIONS[] = {
-    {ADD, "ADD", 3},
-    {AND, "AND", 3},
-    {B, "B",   1},
-    {BL, "BL",  1},
-    {CMP, "CMP", 2},
-    {LDR, "LDR", 2},
-    {MOV, "MOV", 2},
-    {MUL, "MUL", 3},
-    {ORR, "ORR", 3},
-    {STR, "STR", 2},
-    {SUB, "SUB", 3},
-    {SWI, "SWI", 1},
-    {SWI, "SVC", 1}, // SVC is the same as SWI
+    {ADD, "ADD", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
+    {AND, "AND", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
+    {B,   "B",   1, ARG0(REG_OR_LABEL) },
+    {BL,  "BL",  1, ARG0(REG_OR_LABEL) },
+    {CMP, "CMP", 2, ARG0(REGISTER) | ARG1(REG_OR_IMM) },
+    {LDR, "LDR", 2, ARG0(REGISTER) | ARG1(REG_OR_IMM_OR_LABEL)},
+    {MOV, "MOV", 2, ARG0(REGISTER) | ARG1(REG_OR_IMM) },
+    {MUL, "MUL", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REGISTER) },
+    {ORR, "ORR", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
+    {STR, "STR", 2, ARG0(REGISTER) | ARG1(REG_OR_IMM) },
+    {SUB, "SUB", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
+    {SWI, "SWI", 1, ARG0(IMMEDIATE) },
+    {SWI, "SVC", 1, ARG0(IMMEDIATE) }, // SVC is the same as SWI
 };
 
 //////////// UTILS ///////////////
@@ -334,7 +347,7 @@ static bool consume_integer(const char **line, int *integer)
 }
 
 struct OpcodeArg {
-    enum { REGISTER, IMMEDIATE, LABEL } type;
+    enum OpcodeArgType type;
     union {
         uint32_t register_index;
         int32_t immediate;
@@ -691,6 +704,26 @@ static bool parse_mnemonic(const char *mnemonic, struct SupportedInstruction **i
     return false;
 }
 
+static bool validate_instruction_args(int lineidx, struct SupportedInstruction *instruction, int argc, struct OpcodeArg args[])
+{
+    if (argc != instruction->argc) {
+        emit_error(lineidx,
+            "Invalid number of arguments for instruction '%s' "
+            "(expected %d, found %d)",
+            instruction->name, instruction->argc, argc);
+        return false;
+    }
+
+    for (int i = 0; i < argc; i++) {
+        if (!(instruction->argtypes & ARG(i, args[i].type))) {
+            emit_error(lineidx, "Invalid argument type for argument %d", i);
+            return false;
+        }
+    }
+
+    return true;
+}
+
 static bool parse_instruction(int lineidx, const char *line, struct ParsedProgram *program)
 {
     struct OpcodeArg args[4] = { 0 };
@@ -726,11 +759,7 @@ static bool parse_instruction(int lineidx, const char *line, struct ParsedProgra
     if (!parse_mnemonic(instruction_name, &instruction, &condition_flag)) {
         emit_error(lineidx, "Unknown instruction '%s'", instruction_name);
         goto parse_failed;
-    } else if (argc != instruction->argc) {
-        emit_error(lineidx,
-            "Invalid number of arguments for instruction '%s' "
-            "(expected %d, found %d)", instruction_name,
-            instruction->argc, argc);
+    } else if (!validate_instruction_args(lineidx, instruction, argc, args)) {
         goto parse_failed;
     }
     
