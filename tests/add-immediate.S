@@ -1,6 +1,6 @@
 .section .text, "ax"
 _start:
-    add r0, r0, #1
+    add r0, r1, #2
     add r1, r1, #1
     add r2, r2, #1
     add r3, r3, #1

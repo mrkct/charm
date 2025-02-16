@@ -39,27 +39,6 @@ struct SupportedInstruction {
     {SWI, "SWI", 1},
     {SWI, "SVC", 1}, // SVC is the same as SWI
 };
-struct {
-    const char *name;
-    uint32_t value;
-} CONDITIONAL_EXECUTION_SUFFIXES[] = {
-    {"EQ", 0b0000},
-    {"NE", 0b0001},
-    {"CS", 0b0010},
-    {"CC", 0b0011},
-    {"MI", 0b0100}, 
-    {"PL", 0b0101},
-    {"VS", 0b0110},
-    {"VC", 0b0111},
-    {"HI", 0b1000},
-    {"LS", 0b1001},
-    {"GE", 0b1010},
-    {"LT", 0b1011},
-    {"GT", 0b1100},
-    {"LE", 0b1101},
-#define COND_ALWAYS 0b1110
-    {"AL", 0b1110},
-};
 
 //////////// UTILS ///////////////
 
@@ -675,6 +654,18 @@ static bool parse_opcode_arg(int lineidx, const char **line, struct OpcodeArg *a
 
 static bool parse_mnemonic(const char *mnemonic, struct SupportedInstruction **instruction, uint32_t *condition_flag)
 {
+    static struct {
+        const char *name;
+        uint32_t value;
+    } CONDITIONAL_EXECUTION_SUFFIXES[] = {
+        {"EQ", 0b0000}, {"NE", 0b0001}, {"CS", 0b0010},
+        {"CC", 0b0011}, {"MI", 0b0100}, {"PL", 0b0101},
+        {"VS", 0b0110}, {"VC", 0b0111}, {"HI", 0b1000},
+        {"LS", 0b1001}, {"GE", 0b1010}, {"LT", 0b1011},
+        {"GT", 0b1100}, {"LE", 0b1101}, {"AL", 0b1110},
+        #define COND_ALWAYS 0b1110
+    };
+
     for (size_t i = 0; i < ARRAY_SIZE(SUPPORTED_INSTRUCTIONS); i++) {
         size_t instr_len = strlen(SUPPORTED_INSTRUCTIONS[i].name);
 
@@ -887,9 +878,6 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
     conditional_execution_mask = ((uint32_t) item->instruction.condition_flag) << 28;
     switch (item->instruction.opcode) {
         case ADD:
-            assert(item->instruction.args[0].type == IMMEDIATE || 
-                   item->instruction.args[0].type == REGISTER);
-
             *instruction = 0b00000000100000000000000000000000;
             *instruction |= conditional_execution_mask;
             *instruction |= Rn(item->instruction.args[1]);
@@ -902,6 +890,16 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             }
             break;
         case AND:
+            *instruction = 0b00000000000000000000000000000000;
+            *instruction |= conditional_execution_mask;
+            *instruction |= Rn(item->instruction.args[1]);
+            *instruction |= Rd(item->instruction.args[0]);
+            if (item->instruction.args[2].type == IMMEDIATE) {
+                *instruction |= immediate_bit;
+                *instruction |= item->instruction.args[2].immediate & 0xfff;
+            } else {
+                *instruction |= Rm(item->instruction.args[2]);
+            }
             break;
         case B:
         case BL: {
@@ -960,12 +958,39 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             }
             break;
         case MUL:
+            /* NOTE: Rn, Rm and Rd are placed in different positions
+               compared to other instructions */
+            *instruction = 0b00000000000000000000000010010000;
+            *instruction |= conditional_execution_mask;
+            *instruction |= (item->instruction.args[0].register_index & 0xf) << 16;
+            *instruction |= (item->instruction.args[1].register_index & 0xf) << 0;
+            *instruction |= (item->instruction.args[2].register_index & 0xf) << 8;
             break;
         case ORR:
+            *instruction = 0b00000001100000000000000000000000;
+            *instruction |= conditional_execution_mask;
+            *instruction |= Rn(item->instruction.args[1]);
+            *instruction |= Rd(item->instruction.args[0]);
+            if (item->instruction.args[2].type == IMMEDIATE) {
+                *instruction |= immediate_bit;
+                *instruction |= item->instruction.args[2].immediate & 0xfff;
+            } else {
+                *instruction |= Rm(item->instruction.args[2]);
+            }
             break;
         case STR:
             break;
         case SUB:
+            *instruction = 0b00000000010000000000000000000000;
+            *instruction |= conditional_execution_mask;
+            *instruction |= Rn(item->instruction.args[1]);
+            *instruction |= Rd(item->instruction.args[0]);
+            if (item->instruction.args[2].type == IMMEDIATE) {
+                *instruction |= immediate_bit;
+                *instruction |= item->instruction.args[2].immediate & 0xfff;
+            } else {
+                *instruction |= Rm(item->instruction.args[2]);
+            }
             break;
         case SWI:
             assert(item->instruction.args[0].type == IMMEDIATE);
