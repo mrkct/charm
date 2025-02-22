@@ -356,6 +356,7 @@ struct OpcodeArg {
 };
 
 struct Instruction {
+    int lineidx;
     uint32_t condition_flag;
     enum Opcode opcode;
     size_t argc;
@@ -767,6 +768,7 @@ static bool parse_instruction(int lineidx, const char *line, struct ParsedProgra
         .type = INSTRUCTION,
         .length = 4,
         .instruction = {
+            .lineidx = lineidx,
             .condition_flag = condition_flag,
             .opcode = instruction->opcode,
             .args = {
@@ -938,13 +940,15 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             
             int64_t jump = 0;
             if (!hashmap_get(program->labels, item->instruction.args[0].label, &addr)) {
-                emit_error(-1, "Label not found: %s", item->instruction.args[0].label);
+                emit_error(item->instruction.lineidx,
+                    "Label not found: %s", item->instruction.args[0].label);
                 return false;
             }
 
             jump = (int64_t) addr - pc;
             if (jump <= -0x2000000 || jump > 0x1ffffc) {
-                emit_error(-1, "Branch out of range: %s", item->instruction.args[0].label);
+                emit_error(item->instruction.lineidx,
+                    "Branch out of range: %s", item->instruction.args[0].label);
                 return false;
             }
 
@@ -977,13 +981,15 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             
             int64_t jump = 0;
             if (!hashmap_get(program->labels, item->instruction.args[1].label, &addr)) {
-                emit_error(-1, "Label not found: %s", item->instruction.args[0].label);
+                emit_error(item->instruction.lineidx,
+                    "Label not found: %s", item->instruction.args[0].label);
                 return false;
             }
 
             jump = (int64_t) addr - pc;
             if (jump <= -0x1000 || jump >= 0x1000) {
-                emit_error(-1, "Label out of range: %s", item->instruction.args[0].label);
+                emit_error(item->instruction.lineidx,
+                    "Label out of range: %s", item->instruction.args[0].label);
                 return false;
             }
 
@@ -1045,13 +1051,15 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             
             int64_t jump = 0;
             if (!hashmap_get(program->labels, item->instruction.args[1].label, &addr)) {
-                emit_error(-1, "Label not found: %s", item->instruction.args[0].label);
+                emit_error(item->instruction.lineidx,
+                    "Label not found: %s", item->instruction.args[0].label);
                 return false;
             }
 
             jump = (int64_t) addr - pc;
             if (jump <= -0x1000 || jump >= 0x1000) {
-                emit_error(-1, "Label out of range: %s", item->instruction.args[0].label);
+                emit_error(item->instruction.lineidx,
+                    "Label out of range: %s", item->instruction.args[0].label);
                 return false;
             }
 
