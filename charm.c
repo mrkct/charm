@@ -43,11 +43,11 @@ struct SupportedInstruction {
     {B,   "B",   1, ARG0(REG_OR_LABEL) },
     {BL,  "BL",  1, ARG0(REG_OR_LABEL) },
     {CMP, "CMP", 2, ARG0(REGISTER) | ARG1(REG_OR_IMM) },
-    {LDR, "LDR", 2, ARG0(REGISTER) | ARG1(REG_OR_IMM_OR_LABEL)},
+    {LDR, "LDR", 2, ARG0(REGISTER) | ARG1(LABEL)},
     {MOV, "MOV", 2, ARG0(REGISTER) | ARG1(REG_OR_IMM) },
     {MUL, "MUL", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REGISTER) },
     {ORR, "ORR", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
-    {STR, "STR", 2, ARG0(REGISTER) | ARG1(REG_OR_IMM) },
+    {STR, "STR", 2, ARG0(REGISTER) | ARG1(LABEL) },
     {SUB, "SUB", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
     {SWI, "SWI", 1, ARG0(IMMEDIATE) },
     {SWI, "SVC", 1, ARG0(IMMEDIATE) }, // SVC is the same as SWI
@@ -896,9 +896,11 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
 {
 #define opcode(n)       (((n) & 0x7f) << 21)
 #define immediate_bit   ((uint32_t) 1 << 25)
+#define Rn_PC           ((uint32_t) 15 << 16)
 #define Rn(n)           ((((n).register_index) & 0xf) << 16)
 #define Rm(n)           ((((n).register_index) & 0xf) << 0)
 #define Rd(n)           ((((n).register_index) & 0xf) << 12)
+#define Rt(n)           ((((n).register_index) & 0xf) << 12)
 
     uint32_t addr;
     uint32_t conditional_execution_mask;
@@ -969,8 +971,38 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             }
             break;
         }
-        case LDR:
+        case LDR:{
+            assert(item->instruction.args[0].type == REGISTER);
+            assert(item->instruction.args[1].type == LABEL);
+            
+            int64_t jump = 0;
+            if (!hashmap_get(program->labels, item->instruction.args[1].label, &addr)) {
+                emit_error(-1, "Label not found: %s", item->instruction.args[0].label);
+                return false;
+            }
+
+            jump = (int64_t) addr - pc;
+            if (jump <= -0x1000 || jump >= 0x1000) {
+                emit_error(-1, "Label out of range: %s", item->instruction.args[0].label);
+                return false;
+            }
+
+            *instruction = 0b00000100000100000000000000000000;
+            *instruction |= conditional_execution_mask;
+            *instruction |= 1 << 24; /* Set P=1 because we should use the imm value */
+            if (jump >= 0) {
+                /* Set U=1 because the imm value must be added to the register */
+                *instruction |= 1 << 23;
+            } else {
+                /* Set U=0 because the imm value must be subtracted from the register */
+                jump = -jump;
+            }
+            *instruction |= Rt(item->instruction.args[0]);
+            *instruction |= Rn_PC;
+            *instruction |= ((uint32_t) jump) & 0xfff;
+
             break;
+        }
         case MOV:
             assert(item->instruction.args[0].type == REGISTER);
             assert(item->instruction.args[1].type == IMMEDIATE ||
@@ -1007,8 +1039,38 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
                 *instruction |= Rm(item->instruction.args[2]);
             }
             break;
-        case STR:
+        case STR: {
+            assert(item->instruction.args[0].type == REGISTER);
+            assert(item->instruction.args[1].type == LABEL);
+            
+            int64_t jump = 0;
+            if (!hashmap_get(program->labels, item->instruction.args[1].label, &addr)) {
+                emit_error(-1, "Label not found: %s", item->instruction.args[0].label);
+                return false;
+            }
+
+            jump = (int64_t) addr - pc;
+            if (jump <= -0x1000 || jump >= 0x1000) {
+                emit_error(-1, "Label out of range: %s", item->instruction.args[0].label);
+                return false;
+            }
+
+            *instruction = 0b00000100000000000000000000000000;
+            *instruction |= conditional_execution_mask;
+            *instruction |= 1 << 24; /* Set P=1 because we should use the imm value */
+            if (jump >= 0) {
+                /* Set U=1 because the imm value must be added to the register */
+                *instruction |= 1 << 23;
+            } else {
+                /* Set U=0 because the imm value must be subtracted from the register */
+                jump = -jump;
+            }
+            *instruction |= Rt(item->instruction.args[0]);
+            *instruction |= Rn_PC;
+            *instruction |= ((uint32_t) jump) & 0xfff;
+
             break;
+        }
         case SUB:
             *instruction = 0b00000000010000000000000000000000;
             *instruction |= conditional_execution_mask;
