@@ -29,5 +29,4 @@ clean:
 	$(RM) -f charm.c.o
 	$(RM) -f charm
 	$(RM) -f tests/*.elf
-	$(RM) -f tests/*.actual
-	$(RM) -f tests/*.expected
+	$(RM) -f tests/*.bin

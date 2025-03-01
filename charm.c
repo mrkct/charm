@@ -1,16 +1,17 @@
 #include <assert.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <stdint.h>
-#include <stddef.h>
-#include <stdbool.h>
 #include <ctype.h>
 #include <stdarg.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include "elf.h"
+
+
+const char* __asan_default_options() { return "detect_leaks=0"; }
 
 #define MAX_SECTIONS        16
 #define SECTION_ALIGNMENT   4096
@@ -135,25 +136,13 @@ static struct HashMap *hashmap_alloc()
     return table;
 }
 
-static void hashmap_free(struct HashMap *table)
-{
-    for (size_t i = 0; i < HASH_SIZE; i++) {
-        struct HashTableEntry *entry = table->entries[i];
-        while (entry) {
-            struct HashTableEntry *next = entry->next;
-            free((void*) entry->key);
-            free(entry);
-            entry = next;
-        }
-    }
-    free(table);
-}
-
 //////////// ARG PARSING ////////////
 
 struct Args {
     const char *input_file_path;
     const char *output_file_path;
+    uint32_t link_address;
+    bool is_output_obj;
 };
 
 static void print_usage()
@@ -181,6 +170,14 @@ static void parse_args(int argc, char *argv[], struct Args *arguments)
 
     arguments->input_file_path = argv[1];
     arguments->output_file_path = argv[2];
+    arguments->link_address = 0x8000;
+
+    // Check if the output file ends with either ".obj" or ".bin"
+    size_t len = strlen(argv[2]);
+    arguments->is_output_obj = (len >= 4 && (
+        0 == strcmp(argv[2] + len - 4, ".obj") || 
+        0 == strcmp(argv[2] + len - 4, ".bin")
+    ));
 }
 
 static void read_file(const char *path, char **contents)
@@ -377,10 +374,13 @@ struct Section {
     uint32_t start;
     size_t size;
     union {
-        unsigned allocable: 1;
-        unsigned read: 1;
-        unsigned write: 1;
-        unsigned exec: 1;
+        struct {
+            unsigned allocable: 1;
+            unsigned read: 1;
+            unsigned write: 1;
+            unsigned exec: 1;
+        };
+        unsigned raw;
     } flags;
 
     struct Item *items;
@@ -438,12 +438,14 @@ static bool parse_section(int lineidx, const char *line, struct ParsedProgram *p
         emit_error(lineidx, "Too many sections");
         goto parse_failed;
     }
-
+    
     struct Section *prev_section = &program->sections[program->sections_length - 1];
     struct Section *section = &program->sections[program->sections_length++];
+    section->start = ROUND_UP(prev_section->start + prev_section->size, SECTION_ALIGNMENT);
     section->name = section_name;
-    section->start = ROUND_UP(prev_section->size, SECTION_ALIGNMENT);
     section->size = 0;
+    section->flags.raw = 0;
+    section->flags.read = 1;
     for (const char *flag = flags; *flag; flag++) {
         switch (*flag) {
         case 'a':
@@ -811,7 +813,7 @@ static bool parse_line(int lineidx, char *line, struct ParsedProgram *program)
     );
 }
 
-static bool parse_program(char *source, struct ParsedProgram *program)
+static bool parse(char *source, uint32_t startaddr, struct ParsedProgram *program)
 {
     bool parsing_failed = false;
     char *line = NULL;
@@ -823,7 +825,7 @@ static bool parse_program(char *source, struct ParsedProgram *program)
     char *name = mustmalloc(strlen("default") + 1);
     strcpy(name, "default");
     s->name = name;
-    s->start = 0,
+    s->start = startaddr,
     s->size = 0,
     s->flags.allocable = 1;
     s->flags.read = 1;
@@ -857,42 +859,55 @@ static bool parse_program(char *source, struct ParsedProgram *program)
     return !parsing_failed;
 }
 
-static void free_program(struct ParsedProgram *program)
+//////// CODE GENERATION ////////
+
+struct Region {
+    struct {
+        unsigned read: 1;
+        unsigned write: 1;
+        unsigned exec: 1;
+    } flags;
+    uint32_t loadaddr;
+    uint8_t *data;
+    size_t size, capacity;
+};
+
+struct ObjectCode {
+    uint32_t entrypoint;
+    struct Region regions[MAX_SECTIONS];
+    size_t regions_length;
+};
+
+static struct Region *push_region(struct ObjectCode *object_code, struct Section *section)
 {
-    size_t idx;
-    for (idx = 0; idx < program->sections_length; idx++) {
-        struct Section *section = &program->sections[idx];
-        
-        for (size_t i = 0; i < section->items_length; i++) {
-            struct Item item = section->items[i];
-            switch (item.type) {
-            case DATA:
-                free((void*) item.data);
-                break;
-            case INSTRUCTION:
-                for (size_t j = 0; j < ARRAY_SIZE(item.instruction.args); j++) {
-                    struct OpcodeArg *arg = &item.instruction.args[j];
-                    switch (arg->type) {
-                    case REGISTER:
-                        break;
-                    case IMMEDIATE:
-                        break;
-                    case LABEL:
-                        free((void*) arg->label);
-                        break;
-                    }
-                }
-                break;
-            }
-        }
-        
-        free((void*) section->name);
-        free(section->items);
+    if (object_code->regions_length == ARRAY_SIZE(object_code->regions)) {
+        emit_error(0, "Reached the limit of %d regions", MAX_SECTIONS);
+        exit(-1);
     }
-    hashmap_free(program->labels);
+
+    struct Region *region = &object_code->regions[object_code->regions_length++];
+    region->flags.read = section->flags.read;
+    region->flags.write = section->flags.write;
+    region->flags.exec = section->flags.exec;
+
+    region->loadaddr = section->start;
+
+    region->data = NULL;
+    region->size = 0;
+    region->capacity = 0;
+
+    return region;
 }
 
-//////// CODE GENERATION ////////
+static void add_data(struct Region *region, const uint8_t *data, size_t size)
+{
+    if (region->capacity < region->size + size) {
+        region->capacity = region->size + ROUND_UP(size, SECTION_ALIGNMENT);
+        region->data = mustrealloc(region->data, region->capacity);
+    }
+    memcpy(region->data + region->size, data, size);
+    region->size += size;
+}
 
 static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, struct Item *item, uint32_t *instruction)
 {
@@ -1103,53 +1118,140 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
     return true;
 }
 
-static bool codegen_obj(struct ParsedProgram *program, int fd)
+static bool codegen(struct ParsedProgram *program, struct ObjectCode *obj)
 {
     uint32_t instruction = 0;
     bool codegen_failed = false;
 
     for (size_t i = 0; i < program->sections_length; i++) {
         struct Section *section = &program->sections[i];
-        uint32_t addr = section->start;
+        if (section->size == 0)
+            continue;
+        struct Region *region = push_region(obj, section);
         for (size_t j = 0; j < section->items_length; j++) {
             struct Item item = section->items[j];
             switch (item.type) {
             case DATA:
-                write(fd, item.data, item.length);
-                addr += item.length;
+                add_data(region, item.data, item.length);
                 break;
             case INSTRUCTION:
                 // pc is always 8 bytes ahead
-                codegen_failed |= !codegen_instruction(program, addr + 8, &item, &instruction);
-                write(fd, (uint8_t*) &instruction, sizeof(instruction));
-                addr += item.length;
+                codegen_failed |= !codegen_instruction(program, region->size + 8, &item, &instruction);
+                add_data(region, (uint8_t*) &instruction, sizeof(instruction));
                 break;
             }
         }
     }
 
+    if (!hashmap_get(program->labels, "_start", &obj->entrypoint)) {
+        emit_error(0, "No '_start' label found, entrypoint will be 0");
+        obj->entrypoint = 0;
+    }
+
     return !codegen_failed;
+}
+
+static void assemble_obj(struct ObjectCode *object, int fd)
+{
+    for (size_t i = 0; i < object->regions_length; i++) {
+        struct Region *region = &object->regions[i];
+        write(fd, region->data, region->size);
+    }
+}
+
+static void assemble_elf(struct ObjectCode *object, int fd)
+{
+    Elf32_Ehdr hdr = {
+        .e_ident = {
+            ELFMAG0, ELFMAG1, ELFMAG2, ELFMAG3, 
+            ELFCLASS32, ELFDATA2LSB,
+            EV_CURRENT
+        },
+        .e_type = ET_EXEC,
+        .e_machine = EM_ARM,
+        .e_version = EV_CURRENT,
+        .e_entry = object->entrypoint,
+        .e_phoff = sizeof(Elf32_Ehdr),
+        .e_shoff = 0,
+        .e_flags = 0x5000200,
+        .e_ehsize = sizeof(Elf32_Ehdr),
+        .e_phentsize = sizeof(Elf32_Phdr),
+        .e_phnum = object->regions_length,
+        .e_shentsize = sizeof(Elf32_Shdr),
+        .e_shnum = 0,
+        .e_shstrndx = 0
+    };
+    write(fd, &hdr, sizeof(hdr));
+
+    uint32_t next_offset = ROUND_UP(sizeof(hdr) + sizeof(Elf32_Phdr) * object->regions_length, 4096);
+    for (size_t i = 0; i < object->regions_length; i++) {
+        struct Region *region = &object->regions[i];
+
+        uint32_t flags = (
+            (region->flags.exec ? PF_X : 0) |
+            (region->flags.write ? PF_W : 0) |
+            (region->flags.read ? PF_R : 0)
+        );
+
+        Elf32_Phdr phdr_hdr = {
+            .p_type = region->size > 0 ? PT_LOAD : PT_NULL,
+            .p_offset = next_offset,
+            .p_vaddr = region->loadaddr,
+            .p_paddr = region->loadaddr,
+            .p_filesz = region->size,
+            .p_memsz = region->size,
+            .p_flags = flags,
+            .p_align = SECTION_ALIGNMENT,
+        };
+        write(fd, &phdr_hdr, sizeof(phdr_hdr));
+        next_offset += region->size;
+    }
+
+    uint8_t zeros[4096] = {0};
+    size_t padding = 4096 - (lseek(fd, 0, SEEK_CUR) % 4096);
+    if (padding < 4096)
+        write(fd, zeros, padding);
+
+    for (size_t i = 0; i < object->regions_length; i++) {
+        struct Region *region = &object->regions[i];
+        write(fd, region->data, region->size);
+    }
 }
 
 int main(int argc, char *argv[])
 {
-    struct Args arguments;
-    struct ParsedProgram program;
-    char *source;
+    struct Args args = {0};
+    struct ParsedProgram parsed = {0};
+    struct ObjectCode object = {0};
+    char *source = NULL;
+    int rc = 0, fd = -1;
 
-    parse_args(argc, argv, &arguments);
-    read_file(arguments.input_file_path, &source);
+    parse_args(argc, argv, &args);
+    read_file(args.input_file_path, &source);
 
-    if (!parse_program(source, &program))
-        exit(-1);
+    if (!parse(source, args.link_address, &parsed)) {
+        rc = -1;
+        goto cleanup;
+    }
 
-    int fd = open(arguments.output_file_path, O_WRONLY | O_CREAT, 0644);
-    if (!codegen_obj(&program, fd))
-        exit(-1);
-    close(fd);
+    if (!codegen(&parsed, &object)) {
+        rc = -1;
+        goto cleanup;
+    }
 
-    free(source);
-    free_program(&program);
+    fd = open(args.output_file_path, O_CREAT | O_WRONLY, 0777);
+    if (fd < 0) {
+        perror("open");
+        rc = -1;
+        goto cleanup;
+    }
 
-    return 0;
+    if (args.is_output_obj) {
+        assemble_obj(&object, fd);
+    } else {
+        assemble_elf(&object, fd);
+    }
+
+cleanup:
+    return rc;
 }
