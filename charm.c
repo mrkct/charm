@@ -1,37 +1,48 @@
 #include <assert.h>
-#include <stdio.h>
+#include <ctype.h>
+#include <fcntl.h>
+#include <stdarg.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <ctype.h>
-#include <stdarg.h>
-#include <fcntl.h>
 #include <unistd.h>
 #include "elf.h"
 
 
-const char* __asan_default_options() { return "detect_leaks=0"; }
+const char *__asan_default_options() { return "detect_leaks=0"; }
 
-#define MAX_SECTIONS        16
-#define SECTION_ALIGNMENT   4096
-#define ROUND_UP(x, y)      (((x) + (y) - 1) & ~((y) - 1))
-#define HASH_SIZE           1024
+#define MAX_SECTIONS 16
+#define SECTION_ALIGNMENT 4096
+#define ROUND_UP(x, y) (((x) + (y) -1) & ~((y) -1))
+#define HASH_SIZE 1024
 
 enum OpcodeArgType {
     REGISTER = 1 << 0,
     IMMEDIATE = 1 << 1,
     LABEL = 1 << 2,
-#define ARG(i, x)           ((x) << (3 * (i)))
-#define ARG0(x)             ARG(0, x)
-#define ARG1(x)             ARG(1, x)
-#define ARG2(x)             ARG(2, x)
-#define REG_OR_IMM          (REGISTER | IMMEDIATE)
-#define REG_OR_LABEL        (REGISTER | LABEL)
+#define ARG(i, x) ((x) << (3 * (i)))
+#define ARG0(x) ARG(0, x)
+#define ARG1(x) ARG(1, x)
+#define ARG2(x) ARG(2, x)
+#define REG_OR_IMM (REGISTER | IMMEDIATE)
+#define REG_OR_LABEL (REGISTER | LABEL)
 #define REG_OR_IMM_OR_LABEL (REGISTER | IMMEDIATE | LABEL)
 };
 enum Opcode {
-    ADD, AND, B, BL, CMP, LDR, MOV, MUL, ORR, STR, SUB, SWI
+    ADD,
+    AND,
+    B,
+    BL,
+    CMP,
+    LDR,
+    MOV,
+    MUL,
+    ORR,
+    STR,
+    SUB,
+    SWI
 };
 struct SupportedInstruction {
     enum Opcode opcode;
@@ -39,19 +50,19 @@ struct SupportedInstruction {
     int argc;
     uint32_t argtypes;
 } SUPPORTED_INSTRUCTIONS[] = {
-    {ADD, "ADD", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
-    {AND, "AND", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
-    {B,   "B",   1, ARG0(REG_OR_LABEL) },
-    {BL,  "BL",  1, ARG0(REG_OR_LABEL) },
-    {CMP, "CMP", 2, ARG0(REGISTER) | ARG1(REG_OR_IMM) },
-    {LDR, "LDR", 2, ARG0(REGISTER) | ARG1(LABEL)},
-    {MOV, "MOV", 2, ARG0(REGISTER) | ARG1(REG_OR_IMM) },
-    {MUL, "MUL", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REGISTER) },
-    {ORR, "ORR", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
-    {STR, "STR", 2, ARG0(REGISTER) | ARG1(LABEL) },
-    {SUB, "SUB", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
-    {SWI, "SWI", 1, ARG0(IMMEDIATE) },
-    {SWI, "SVC", 1, ARG0(IMMEDIATE) }, // SVC is the same as SWI
+    { ADD, "ADD", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
+    { AND, "AND", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
+    { B, "B", 1, ARG0(REG_OR_LABEL) },
+    { BL, "BL", 1, ARG0(REG_OR_LABEL) },
+    { CMP, "CMP", 2, ARG0(REGISTER) | ARG1(REG_OR_IMM) },
+    { LDR, "LDR", 2, ARG0(REGISTER) | ARG1(LABEL) },
+    { MOV, "MOV", 2, ARG0(REGISTER) | ARG1(REG_OR_IMM) },
+    { MUL, "MUL", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REGISTER) },
+    { ORR, "ORR", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
+    { STR, "STR", 2, ARG0(REGISTER) | ARG1(LABEL) },
+    { SUB, "SUB", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
+    { SWI, "SWI", 1, ARG0(IMMEDIATE) },
+    { SWI, "SVC", 1, ARG0(IMMEDIATE) }, // SVC is the same as SWI
 };
 
 //////////// UTILS ///////////////
@@ -258,7 +269,7 @@ static bool consume_identifier(const char **line, char **str)
     // they become ambiguous with numbers
     if (!is_valid_identifier_char(*start) || isdigit(*start))
         return false;
-    
+
     // Advance to the end of the identifier
     while (is_valid_identifier_char(*start)) {
         start++;
@@ -271,8 +282,8 @@ static bool consume_identifier(const char **line, char **str)
 
     // Allocate memory for the identifier and copy it
     *str = mustmalloc(length + 1);
-    strncpy((char *)*str, *line, length);
-    ((char *)*str)[length] = '\0';
+    strncpy((char *) *str, *line, length);
+    ((char *) *str)[length] = '\0';
 
     *line = start;
     return true;
@@ -318,7 +329,7 @@ static bool consume_integer(const char **line, int *integer)
         start++;
     }
 
-    if (*start == '0' && (*(start+1) == 'x' || *(start+1) == 'X')) {
+    if (*start == '0' && (*(start + 1) == 'x' || *(start + 1) == 'X')) {
         base = 16;
         start += 2;
     } else {
@@ -326,8 +337,7 @@ static bool consume_integer(const char **line, int *integer)
     }
 
     while (isdigit(*start) || (base == 16 && isxdigit(*start))) {
-        int digit = isdigit(*start) ?
-            *start - '0' : toupper(*start) - 'A' + 10;
+        int digit = isdigit(*start) ? *start - '0' : toupper(*start) - 'A' + 10;
         value = value * base + digit;
         start++;
         parsed_digits++;
@@ -335,7 +345,7 @@ static bool consume_integer(const char **line, int *integer)
 
     if (negative)
         value = -value;
-    
+
     if (parsed_digits == 0)
         return false;
 
@@ -383,8 +393,8 @@ struct Section {
     size_t size;
     union {
         struct {
-            unsigned write: 1;
-            unsigned exec: 1;
+            unsigned write : 1;
+            unsigned exec : 1;
         };
         unsigned raw;
     } flags;
@@ -403,8 +413,7 @@ static void push_item(struct ParsedProgram *program, struct Item item)
 {
     struct Section *section = &program->sections[program->sections_length - 1];
     if (section->items_length == section->items_capacity) {
-        section->items_capacity = section->items_capacity ?
-            section->items_capacity * 2 : 1;
+        section->items_capacity = section->items_capacity ? section->items_capacity * 2 : 1;
         section->items = mustrealloc(section->items,
             section->items_capacity * sizeof(*section->items));
     }
@@ -436,7 +445,8 @@ static bool parse_section(int lineidx, const char *line, struct ParsedProgram *p
     if (!consume_string(&line, &flags)) {
         emit_error(lineidx,
             "Expected section flags (eg: \"arx\"), "
-            "found '%s' instead", line);
+            "found '%s' instead",
+            line);
         goto parse_failed;
     }
 
@@ -444,7 +454,7 @@ static bool parse_section(int lineidx, const char *line, struct ParsedProgram *p
         emit_error(lineidx, "Too many sections");
         goto parse_failed;
     }
-    
+
     struct Section *prev_section = &program->sections[program->sections_length - 1];
     struct Section *section = &program->sections[program->sections_length++];
     section->start = ROUND_UP(prev_section->start + prev_section->size, SECTION_ALIGNMENT);
@@ -453,18 +463,18 @@ static bool parse_section(int lineidx, const char *line, struct ParsedProgram *p
     section->flags.raw = 0;
     for (const char *flag = flags; *flag; flag++) {
         switch (*flag) {
-        case 'w':
-            section->flags.write = 1;
-            break;
-        case 'x':
-            section->flags.exec = 1;
-            break;
-        case 'a':
-        case 'r':
-            break;
-        default:
-            emit_error(lineidx, "Invalid flag: %c", *flag);
-            goto parse_failed;
+            case 'w':
+                section->flags.write = 1;
+                break;
+            case 'x':
+                section->flags.exec = 1;
+                break;
+            case 'a':
+            case 'r':
+                break;
+            default:
+                emit_error(lineidx, "Invalid flag: %c", *flag);
+                goto parse_failed;
         }
     }
     free(flags);
@@ -495,7 +505,7 @@ static bool parse_global(int lineidx, const char *line)
         emit_error(lineidx, "Expected label name, found '%s' instead", line);
         goto parse_failed;
     }
-    
+
     free(label);
     return true;
 
@@ -554,8 +564,8 @@ parse_failed:
 }
 
 static bool parse_ascii(
-    int lineidx, 
-    const char *line, 
+    int lineidx,
+    const char *line,
     struct ParsedProgram *program)
 {
     char *string = NULL;
@@ -580,7 +590,7 @@ static bool parse_ascii(
         .length = strlen(string) + (include_zero_term ? 1 : 0),
         .data = {
             .type = RAW_DATA,
-            .raw_data = (uint8_t*) string,
+            .raw_data = (uint8_t *) string,
         }
     };
     push_item(program, item);
@@ -645,12 +655,29 @@ static bool parse_register_arg(const char **line, struct OpcodeArg *arg)
     if (!consume_identifier(&start, &iden))
         goto parse_failed;
 
-    static const struct { const char *name; int idx; } REGISTERS[] = {
-        { "r0", 0 },    { "r1", 1 },    { "r2", 2 },    { "r3", 3 },
-        { "r4", 4 },    { "r5", 5 },    { "r6", 6 },    { "r7", 7 },
-        { "r8", 8 },    { "r9", 9 },    { "r10", 10 },  { "r11", 11 },
-        { "r12", 12 },  { "r13", 13 },  { "sp", 13 },   { "r14", 14 },
-        { "lr", 14 },   { "r15", 15 },  { "pc", 15 },
+    static const struct {
+        const char *name;
+        int idx;
+    } REGISTERS[] = {
+        { "r0", 0 },
+        { "r1", 1 },
+        { "r2", 2 },
+        { "r3", 3 },
+        { "r4", 4 },
+        { "r5", 5 },
+        { "r6", 6 },
+        { "r7", 7 },
+        { "r8", 8 },
+        { "r9", 9 },
+        { "r10", 10 },
+        { "r11", 11 },
+        { "r12", 12 },
+        { "r13", 13 },
+        { "sp", 13 },
+        { "r14", 14 },
+        { "lr", 14 },
+        { "r15", 15 },
+        { "pc", 15 },
     };
     for (size_t i = 0; i < ARRAY_SIZE(REGISTERS); i++) {
         if (strcmp(iden, REGISTERS[i].name) == 0) {
@@ -729,12 +756,22 @@ static bool parse_mnemonic(const char *mnemonic, struct SupportedInstruction **i
         const char *name;
         uint32_t value;
     } CONDITIONAL_EXECUTION_SUFFIXES[] = {
-        {"EQ", 0b0000}, {"NE", 0b0001}, {"CS", 0b0010},
-        {"CC", 0b0011}, {"MI", 0b0100}, {"PL", 0b0101},
-        {"VS", 0b0110}, {"VC", 0b0111}, {"HI", 0b1000},
-        {"LS", 0b1001}, {"GE", 0b1010}, {"LT", 0b1011},
-        {"GT", 0b1100}, {"LE", 0b1101}, {"AL", 0b1110},
-        #define COND_ALWAYS 0b1110
+        { "EQ", 0b0000 },
+        { "NE", 0b0001 },
+        { "CS", 0b0010 },
+        { "CC", 0b0011 },
+        { "MI", 0b0100 },
+        { "PL", 0b0101 },
+        { "VS", 0b0110 },
+        { "VC", 0b0111 },
+        { "HI", 0b1000 },
+        { "LS", 0b1001 },
+        { "GE", 0b1010 },
+        { "LT", 0b1011 },
+        { "GT", 0b1100 },
+        { "LE", 0b1101 },
+        { "AL", 0b1110 },
+#define COND_ALWAYS 0b1110
     };
 
     for (size_t i = 0; i < ARRAY_SIZE(SUPPORTED_INSTRUCTIONS); i++) {
@@ -756,7 +793,7 @@ static bool parse_mnemonic(const char *mnemonic, struct SupportedInstruction **i
                     return true;
                 }
             }
-        }        
+        }
     }
 
     return false;
@@ -820,7 +857,7 @@ static bool parse_instruction(int lineidx, const char *line, struct ParsedProgra
     } else if (!validate_instruction_args(lineidx, instruction, argc, args)) {
         goto parse_failed;
     }
-    
+
     struct Item item = {
         .type = INSTRUCTION,
         .length = 4,
@@ -833,8 +870,7 @@ static bool parse_instruction(int lineidx, const char *line, struct ParsedProgra
                 [1] = args[1],
                 [2] = args[2],
                 [3] = args[3],
-            }
-        }
+            } }
     };
     push_item(program, item);
     free(instruction_name);
@@ -857,7 +893,7 @@ static bool parse_line(int lineidx, char *line, struct ParsedProgram *program)
     }
 
     // Empty lines are not an error
-    line = (char*) skip_whitespace(line);
+    line = (char *) skip_whitespace(line);
     if (*line == '\0')
         return true;
 
@@ -916,8 +952,8 @@ static bool parse(char *source, uint32_t startaddr, struct ParsedProgram *progra
 
 struct Region {
     struct {
-        unsigned write: 1;
-        unsigned exec: 1;
+        unsigned write : 1;
+        unsigned exec : 1;
     } flags;
     uint32_t loadaddr;
     uint8_t *data;
@@ -962,13 +998,13 @@ static void add_data(struct Region *region, const uint8_t *data, size_t size)
 
 static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, struct Item *item, uint32_t *instruction)
 {
-#define opcode(n)       (((n) & 0x7f) << 21)
-#define immediate_bit   ((uint32_t) 1 << 25)
-#define Rn_PC           ((uint32_t) 15 << 16)
-#define Rn(n)           ((((n).register_index) & 0xf) << 16)
-#define Rm(n)           ((((n).register_index) & 0xf) << 0)
-#define Rd(n)           ((((n).register_index) & 0xf) << 12)
-#define Rt(n)           ((((n).register_index) & 0xf) << 12)
+    static const uint32_t IMMEDIATE_BIT = (uint32_t) 1 << 25;
+    static const uint32_t Rn_PC = (uint32_t) 15 << 16;
+#define opcode(n) (((n) & 0x7f) << 21)
+#define Rn(n) ((((n).register_index) & 0xf) << 16)
+#define Rm(n) ((((n).register_index) & 0xf) << 0)
+#define Rd(n) ((((n).register_index) & 0xf) << 12)
+#define Rt(n) ((((n).register_index) & 0xf) << 12)
 
     uint32_t addr;
     uint32_t conditional_execution_mask;
@@ -982,7 +1018,7 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             *instruction |= Rn(item->instruction.args[1]);
             *instruction |= Rd(item->instruction.args[0]);
             if (item->instruction.args[2].type == IMMEDIATE) {
-                *instruction |= immediate_bit;
+                *instruction |= IMMEDIATE_BIT;
                 *instruction |= item->instruction.args[2].immediate & 0xfff;
             } else {
                 *instruction |= Rm(item->instruction.args[2]);
@@ -994,7 +1030,7 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             *instruction |= Rn(item->instruction.args[1]);
             *instruction |= Rd(item->instruction.args[0]);
             if (item->instruction.args[2].type == IMMEDIATE) {
-                *instruction |= immediate_bit;
+                *instruction |= IMMEDIATE_BIT;
                 *instruction |= item->instruction.args[2].immediate & 0xfff;
             } else {
                 *instruction |= Rm(item->instruction.args[2]);
@@ -1003,7 +1039,7 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
         case B:
         case BL: {
             assert(item->instruction.args[0].type == LABEL);
-            
+
             int64_t jump = 0;
             if (!hashmap_get(program->labels, item->instruction.args[0].label, &addr)) {
                 emit_error(item->instruction.lineidx,
@@ -1027,24 +1063,23 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
         }
         case CMP: {
             assert(item->instruction.args[0].type == REGISTER);
-            assert(item->instruction.args[1].type == REGISTER ||
-                   item->instruction.args[1].type == IMMEDIATE);
-            
+            assert(item->instruction.args[1].type == REGISTER || item->instruction.args[1].type == IMMEDIATE);
+
             *instruction = 0b00000001010100000000000000000000;
             *instruction |= conditional_execution_mask;
             *instruction |= Rn(item->instruction.args[0]);
             if (item->instruction.args[1].type == IMMEDIATE) {
-                *instruction |= immediate_bit;
+                *instruction |= IMMEDIATE_BIT;
                 *instruction |= item->instruction.args[1].immediate & 0xfff;
             } else {
                 *instruction |= Rm(item->instruction.args[1]);
             }
             break;
         }
-        case LDR:{
+        case LDR: {
             assert(item->instruction.args[0].type == REGISTER);
             assert(item->instruction.args[1].type == LABEL);
-            
+
             int64_t jump = 0;
             if (!hashmap_get(program->labels, item->instruction.args[1].label, &addr)) {
                 emit_error(item->instruction.lineidx,
@@ -1078,14 +1113,13 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
         }
         case MOV:
             assert(item->instruction.args[0].type == REGISTER);
-            assert(item->instruction.args[1].type == IMMEDIATE ||
-                   item->instruction.args[1].type == REGISTER);
+            assert(item->instruction.args[1].type == IMMEDIATE || item->instruction.args[1].type == REGISTER);
 
             *instruction = 0b00000001101000000000000000000000;
             *instruction |= conditional_execution_mask;
             *instruction |= Rd(item->instruction.args[0]);
             if (item->instruction.args[1].type == IMMEDIATE) {
-                *instruction |= immediate_bit;
+                *instruction |= IMMEDIATE_BIT;
                 *instruction |= item->instruction.args[1].immediate & 0xfff;
             } else {
                 *instruction |= Rm(item->instruction.args[1]);
@@ -1106,7 +1140,7 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             *instruction |= Rn(item->instruction.args[1]);
             *instruction |= Rd(item->instruction.args[0]);
             if (item->instruction.args[2].type == IMMEDIATE) {
-                *instruction |= immediate_bit;
+                *instruction |= IMMEDIATE_BIT;
                 *instruction |= item->instruction.args[2].immediate & 0xfff;
             } else {
                 *instruction |= Rm(item->instruction.args[2]);
@@ -1115,7 +1149,7 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
         case STR: {
             assert(item->instruction.args[0].type == REGISTER);
             assert(item->instruction.args[1].type == LABEL);
-            
+
             int64_t jump = 0;
             if (!hashmap_get(program->labels, item->instruction.args[1].label, &addr)) {
                 emit_error(item->instruction.lineidx,
@@ -1152,7 +1186,7 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             *instruction |= Rn(item->instruction.args[1]);
             *instruction |= Rd(item->instruction.args[0]);
             if (item->instruction.args[2].type == IMMEDIATE) {
-                *instruction |= immediate_bit;
+                *instruction |= IMMEDIATE_BIT;
                 *instruction |= item->instruction.args[2].immediate & 0xfff;
             } else {
                 *instruction |= Rm(item->instruction.args[2]);
@@ -1183,29 +1217,29 @@ static bool codegen(struct ParsedProgram *program, struct ObjectCode *obj)
         for (size_t j = 0; j < section->items_length; j++) {
             struct Item item = section->items[j];
             switch (item.type) {
-            case DATA: {
-                switch (item.data.type) {
-                case RAW_DATA:
-                    add_data(region, item.data.raw_data, item.length);
-                    break;
-                case LABEL_ADDR: {
-                    uint32_t addr;
-                    if (!hashmap_get(program->labels, item.data.label, &addr)) {
-                        emit_error(item.instruction.lineidx, "Label not found: %s", item.data.label);
+                case DATA: {
+                    switch (item.data.type) {
+                        case RAW_DATA:
+                            add_data(region, item.data.raw_data, item.length);
+                            break;
+                        case LABEL_ADDR: {
+                            uint32_t addr;
+                            if (!hashmap_get(program->labels, item.data.label, &addr)) {
+                                emit_error(item.instruction.lineidx, "Label not found: %s", item.data.label);
+                            }
+                            add_data(region, (uint8_t *) &addr, sizeof(addr));
+                            break;
+                        }
                     }
-                    add_data(region, (uint8_t*) &addr, sizeof(addr));
                     break;
                 }
+                case INSTRUCTION: {
+                    // pc is always 8 bytes ahead
+                    uint32_t pc = region->loadaddr + region->size + 8;
+                    codegen_failed |= !codegen_instruction(program, pc, &item, &instruction);
+                    add_data(region, (uint8_t *) &instruction, sizeof(instruction));
+                    break;
                 }
-                break;
-            }
-            case INSTRUCTION: {
-                // pc is always 8 bytes ahead
-                uint32_t pc = region->loadaddr + region->size + 8;
-                codegen_failed |= !codegen_instruction(program, pc, &item, &instruction);
-                add_data(region, (uint8_t*) &instruction, sizeof(instruction));
-                break;
-            }
             }
         }
     }
@@ -1230,7 +1264,7 @@ static void assemble_elf(struct ObjectCode *object, int fd)
 {
     Elf32_Ehdr hdr = {
         .e_ident = {
-            ELFMAG0, ELFMAG1, ELFMAG2, ELFMAG3, 
+            ELFMAG0, ELFMAG1, ELFMAG2, ELFMAG3,
             ELFCLASS32, ELFDATA2LSB,
             EV_CURRENT
         },
@@ -1260,7 +1294,7 @@ static void assemble_elf(struct ObjectCode *object, int fd)
         );
 
         Elf32_Phdr phdr_hdr = {
-            .p_type = region->size > 0 ? PT_LOAD : PT_NULL,
+            .p_type = PT_LOAD,
             .p_offset = next_offset,
             .p_vaddr = region->loadaddr,
             .p_paddr = region->loadaddr,
@@ -1273,7 +1307,7 @@ static void assemble_elf(struct ObjectCode *object, int fd)
         next_offset += region->size;
     }
 
-    uint8_t zeros[4096] = {0};
+    uint8_t zeros[4096] = { 0 };
     size_t padding = 4096 - (lseek(fd, 0, SEEK_CUR) % 4096);
     if (padding < 4096)
         write(fd, zeros, padding);
@@ -1286,9 +1320,9 @@ static void assemble_elf(struct ObjectCode *object, int fd)
 
 int main(int argc, char *argv[])
 {
-    struct Args args = {0};
-    struct ParsedProgram parsed = {0};
-    struct ObjectCode object = {0};
+    struct Args args = { 0 };
+    struct ParsedProgram parsed = { 0 };
+    struct ObjectCode object = { 0 };
     char *source = NULL;
     int rc = 0, fd = -1;
 

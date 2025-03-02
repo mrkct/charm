@@ -1,5 +1,5 @@
-CFLAGS = -Wall -Wextra -O0 -g -std=c2x -pedantic 
-ENABLE_SANITIZERS ?= 1
+CFLAGS = -Wall -Wextra -O2 -g3 -std=c2x -pedantic 
+ENABLE_SANITIZERS ?= 0
 ifeq ($(ENABLE_SANITIZERS), 1)
 	CFLAGS += -fsanitize=address \
 		-fsanitize=undefined -fsanitize=leak \

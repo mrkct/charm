@@ -26,18 +26,12 @@ a flat binary.
 
 ## Compiling
 
-Compiling charm only requires a C compiler.
-To compile by yourself, run:
+Compiling charm requires a recent C compiler (it uses some C23 features).
 
-    cc charm.c -o charm
+    make
 
-If you want to develop charm, you should also get `make`, a POSIX shell
-and the GNU tools in `arm-none-eabi-gcc` as the tools 
-`as` and `objdump` are used validation.
-
-There is also a Makefile with a few targets that you might
-be interested in; it's probably easiest to just see what's
-there by yourself.
+Running the test suite requires the GNU tools in `arm-none-eabi-gcc`
+because `as` and `objdump`' are used for validation.
 
 ## Limitations
 
