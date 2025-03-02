@@ -3,7 +3,7 @@
 _start:
     mov r7, #4
     mov r0, #1
-    add r1, pc, #16  // ldr r1, msg_addr
+    ldr r1, message_addr
     mov r2, #13
     svc #0
 
@@ -11,5 +11,7 @@ _start:
     mov r0, #0
     svc #0
 
+message_addr:
+    .word message
 message:
     .asciz "Hello World!\n"

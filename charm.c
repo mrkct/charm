@@ -170,14 +170,16 @@ static void parse_args(int argc, char *argv[], struct Args *arguments)
 
     arguments->input_file_path = argv[1];
     arguments->output_file_path = argv[2];
-    arguments->link_address = 0x8000;
 
     // Check if the output file ends with either ".obj" or ".bin"
     size_t len = strlen(argv[2]);
-    arguments->is_output_obj = (len >= 4 && (
-        0 == strcmp(argv[2] + len - 4, ".obj") || 
-        0 == strcmp(argv[2] + len - 4, ".bin")
-    ));
+    if (len >= 4 && (0 == strcmp(argv[2] + len - 4, ".obj") || 0 == strcmp(argv[2] + len - 4, ".bin"))) {
+        arguments->is_output_obj = true;
+        arguments->link_address = 0x0;
+    } else {
+        arguments->is_output_obj = false;
+        arguments->link_address = 0x8000;
+    }
 }
 
 static void read_file(const char *path, char **contents)
@@ -365,7 +367,13 @@ struct Item {
     size_t length;
     union {
         struct Instruction instruction;
-        const uint8_t *data;
+        struct {
+            enum { RAW_DATA, LABEL_ADDR } type;
+            union {
+                const uint8_t *raw_data;
+                const char *label;
+            };
+        } data;
     };
 };
 
@@ -375,8 +383,6 @@ struct Section {
     size_t size;
     union {
         struct {
-            unsigned allocable: 1;
-            unsigned read: 1;
             unsigned write: 1;
             unsigned exec: 1;
         };
@@ -445,20 +451,16 @@ static bool parse_section(int lineidx, const char *line, struct ParsedProgram *p
     section->name = section_name;
     section->size = 0;
     section->flags.raw = 0;
-    section->flags.read = 1;
     for (const char *flag = flags; *flag; flag++) {
         switch (*flag) {
-        case 'a':
-            section->flags.allocable = 1;
-            break;
-        case 'r':
-            section->flags.read = 1;
-            break;
         case 'w':
             section->flags.write = 1;
             break;
         case 'x':
             section->flags.exec = 1;
+            break;
+        case 'a':
+        case 'r':
             break;
         default:
             emit_error(lineidx, "Invalid flag: %c", *flag);
@@ -502,6 +504,55 @@ parse_failed:
     return false;
 }
 
+static bool parse_word(int lineidx, const char *line, struct ParsedProgram *program)
+{
+    char *label = NULL;
+    int value;
+
+    if (!consume(&line, "word"))
+        goto parse_failed;
+
+    line = skip_whitespace(line);
+
+    if (consume_integer(&line, &value)) {
+
+        uint8_t *data = mustmalloc(4);
+        data[0] = (uint32_t) value;
+        data[1] = (uint32_t) value >> 8;
+        data[2] = (uint32_t) value >> 16;
+        data[3] = (uint32_t) value >> 24;
+
+        struct Item item = {
+            .type = DATA,
+            .length = 4,
+            .data = {
+                .type = RAW_DATA,
+                .raw_data = data,
+            }
+        };
+        push_item(program, item);
+    } else if (consume_identifier(&line, &label)) {
+        struct Item item = {
+            .type = DATA,
+            .length = 4,
+            .data = {
+                .type = LABEL_ADDR,
+                .label = label,
+            }
+        };
+        push_item(program, item);
+    } else {
+        emit_error(lineidx, "Expected integer or label name, found '%s' instead", line);
+        goto parse_failed;
+    }
+
+    return true;
+
+parse_failed:
+    free(label);
+    return false;
+}
+
 static bool parse_ascii(
     int lineidx, 
     const char *line, 
@@ -527,7 +578,10 @@ static bool parse_ascii(
     struct Item item = {
         .type = DATA,
         .length = strlen(string) + (include_zero_term ? 1 : 0),
-        .data = (uint8_t*) string
+        .data = {
+            .type = RAW_DATA,
+            .raw_data = (uint8_t*) string,
+        }
     };
     push_item(program, item);
 
@@ -549,6 +603,7 @@ static bool parse_preprocessor_directive(
 
     return (
         parse_section(lineidx, line, program) ||
+        parse_word(lineidx, line, program) ||
         parse_ascii(lineidx, line, program) ||
         parse_global(lineidx, line) ||
         emit_error(lineidx, "Unknown preprocessor directive: %s", line)
@@ -827,8 +882,6 @@ static bool parse(char *source, uint32_t startaddr, struct ParsedProgram *progra
     s->name = name;
     s->start = startaddr,
     s->size = 0,
-    s->flags.allocable = 1;
-    s->flags.read = 1;
     s->flags.write = 0;
     s->flags.exec = 1;
     s->items = NULL;
@@ -863,7 +916,6 @@ static bool parse(char *source, uint32_t startaddr, struct ParsedProgram *progra
 
 struct Region {
     struct {
-        unsigned read: 1;
         unsigned write: 1;
         unsigned exec: 1;
     } flags;
@@ -886,7 +938,6 @@ static struct Region *push_region(struct ObjectCode *object_code, struct Section
     }
 
     struct Region *region = &object_code->regions[object_code->regions_length++];
-    region->flags.read = section->flags.read;
     region->flags.write = section->flags.write;
     region->flags.exec = section->flags.exec;
 
@@ -997,14 +1048,15 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             int64_t jump = 0;
             if (!hashmap_get(program->labels, item->instruction.args[1].label, &addr)) {
                 emit_error(item->instruction.lineidx,
-                    "Label not found: %s", item->instruction.args[0].label);
+                    "Label not found: %s", item->instruction.args[1].label);
                 return false;
             }
 
             jump = (int64_t) addr - pc;
             if (jump <= -0x1000 || jump >= 0x1000) {
+                printf("pc: %x   - label: %x\n", pc, addr);
                 emit_error(item->instruction.lineidx,
-                    "Label out of range: %s", item->instruction.args[0].label);
+                    "Label out of range: %s", item->instruction.args[1].label);
                 return false;
             }
 
@@ -1067,14 +1119,14 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             int64_t jump = 0;
             if (!hashmap_get(program->labels, item->instruction.args[1].label, &addr)) {
                 emit_error(item->instruction.lineidx,
-                    "Label not found: %s", item->instruction.args[0].label);
+                    "Label not found: %s", item->instruction.args[1].label);
                 return false;
             }
 
             jump = (int64_t) addr - pc;
             if (jump <= -0x1000 || jump >= 0x1000) {
                 emit_error(item->instruction.lineidx,
-                    "Label out of range: %s", item->instruction.args[0].label);
+                    "Label out of range: %s", item->instruction.args[1].label);
                 return false;
             }
 
@@ -1131,14 +1183,29 @@ static bool codegen(struct ParsedProgram *program, struct ObjectCode *obj)
         for (size_t j = 0; j < section->items_length; j++) {
             struct Item item = section->items[j];
             switch (item.type) {
-            case DATA:
-                add_data(region, item.data, item.length);
+            case DATA: {
+                switch (item.data.type) {
+                case RAW_DATA:
+                    add_data(region, item.data.raw_data, item.length);
+                    break;
+                case LABEL_ADDR: {
+                    uint32_t addr;
+                    if (!hashmap_get(program->labels, item.data.label, &addr)) {
+                        emit_error(item.instruction.lineidx, "Label not found: %s", item.data.label);
+                    }
+                    add_data(region, (uint8_t*) &addr, sizeof(addr));
+                    break;
+                }
+                }
                 break;
-            case INSTRUCTION:
+            }
+            case INSTRUCTION: {
                 // pc is always 8 bytes ahead
-                codegen_failed |= !codegen_instruction(program, region->size + 8, &item, &instruction);
+                uint32_t pc = region->loadaddr + region->size + 8;
+                codegen_failed |= !codegen_instruction(program, pc, &item, &instruction);
                 add_data(region, (uint8_t*) &instruction, sizeof(instruction));
                 break;
+            }
             }
         }
     }
@@ -1187,10 +1254,9 @@ static void assemble_elf(struct ObjectCode *object, int fd)
     for (size_t i = 0; i < object->regions_length; i++) {
         struct Region *region = &object->regions[i];
 
-        uint32_t flags = (
+        uint32_t flags = PF_R | (
             (region->flags.exec ? PF_X : 0) |
-            (region->flags.write ? PF_W : 0) |
-            (region->flags.read ? PF_R : 0)
+            (region->flags.write ? PF_W : 0)
         );
 
         Elf32_Phdr phdr_hdr = {
