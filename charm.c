@@ -27,6 +27,7 @@ enum OpcodeArgType {
 #define ARG0(x) ARG(0, x)
 #define ARG1(x) ARG(1, x)
 #define ARG2(x) ARG(2, x)
+#define ARG3(x) ARG(3, x)
 #define REG_OR_IMM (REGISTER | IMMEDIATE)
 #define REG_OR_LABEL (REGISTER | LABEL)
 #define REG_OR_IMM_OR_LABEL (REGISTER | IMMEDIATE | LABEL)
@@ -34,15 +35,19 @@ enum OpcodeArgType {
 enum Opcode {
     ADD,
     AND,
+    ASR,
     B,
     BL,
     CMP,
     LDR,
+    LSL,
+    LSR,
     MOV,
     MUL,
     ORR,
     POP,
     PUSH,
+    SMULL,
     STR,
     SUB,
     SWI
@@ -55,16 +60,20 @@ struct SupportedInstruction {
 } SUPPORTED_INSTRUCTIONS[] = {
     { ADD, "ADD", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
     { AND, "AND", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
+    { ASR, "ASR", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
     { B, "B", 1, ARG0(REG_OR_LABEL) },
     { BL, "BL", 1, ARG0(REG_OR_LABEL) },
     { CMP, "CMP", 2, ARG0(REGISTER) | ARG1(REG_OR_IMM) },
     { LDR, "LDR", 2, ARG0(REGISTER) | ARG1(LABEL) },
+    { LSL, "LSL", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
+    { LSR, "LSR", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
     { MOV, "MOV", 2, ARG0(REGISTER) | ARG1(REG_OR_IMM) },
     { MUL, "MUL", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REGISTER) },
     { ORR, "ORR", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
     { POP, "POP", 1, ARG0(REGISTER_LIST) },
     { PUSH, "PUSH", 1, ARG0(REGISTER_LIST) },
     { STR, "STR", 2, ARG0(REGISTER) | ARG1(LABEL) },
+    { SMULL, "SMULL", 4, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REGISTER) | ARG3(REGISTER) },
     { SUB, "SUB", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
     { SWI, "SWI", 1, ARG0(IMMEDIATE) },
     { SWI, "SVC", 1, ARG0(IMMEDIATE) }, // SVC is the same as SWI
@@ -1062,10 +1071,12 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
     static const uint32_t IMMEDIATE_BIT = (uint32_t) 1 << 25;
     static const uint32_t Rn_PC = (uint32_t) 15 << 16;
 #define opcode(n) (((n) & 0x7f) << 21)
+#define RegShift(r, n) (((r).register_index & 0xf) << n)
 #define Rn(n) ((((n).register_index) & 0xf) << 16)
 #define Rm(n) ((((n).register_index) & 0xf) << 0)
 #define Rd(n) ((((n).register_index) & 0xf) << 12)
 #define Rt(n) ((((n).register_index) & 0xf) << 12)
+#define Imm5(i, n) (((i).immediate & 0x1f) << n)
 
     uint32_t addr;
     uint32_t conditional_execution_mask;
@@ -1097,6 +1108,18 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
                 *instruction |= Rm(item->instruction.args[2]);
             }
             break;
+        case ASR:
+            *instruction = 0b00000001101000000000000001000000;
+            *instruction |= conditional_execution_mask;
+            *instruction |= RegShift(item->instruction.args[0], 12);
+            *instruction |= RegShift(item->instruction.args[1], 0);
+            if (item->instruction.args[2].type == IMMEDIATE) {
+                *instruction |= Imm5(item->instruction.args[2], 7);
+            } else {
+                *instruction |= 1 << 4;
+                *instruction |= RegShift(item->instruction.args[2], 8);
+            }
+            break;            
         case B:
         case BL: {
             assert(item->instruction.args[0].type == LABEL);
@@ -1172,6 +1195,30 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
 
             break;
         }
+        case LSL:
+            *instruction = 0b00000001101000000000000000000000;
+            *instruction |= conditional_execution_mask;
+            *instruction |= RegShift(item->instruction.args[0], 12);
+            *instruction |= RegShift(item->instruction.args[1], 0);
+            if (item->instruction.args[2].type == IMMEDIATE) {
+                *instruction |= Imm5(item->instruction.args[2], 7);
+            } else {
+                *instruction |= 1 << 4;
+                *instruction |= RegShift(item->instruction.args[2], 8);
+            }
+            break;
+        case LSR:
+            *instruction = 0b00000001101000000000000000100000;
+            *instruction |= conditional_execution_mask;
+            *instruction |= RegShift(item->instruction.args[0], 12);
+            *instruction |= RegShift(item->instruction.args[1], 0);
+            if (item->instruction.args[2].type == IMMEDIATE) {
+                *instruction |= Imm5(item->instruction.args[2], 7);
+            } else {
+                *instruction |= 1 << 4;
+                *instruction |= RegShift(item->instruction.args[2], 8);
+            }
+            break;
         case MOV:
             assert(item->instruction.args[0].type == REGISTER);
             assert(item->instruction.args[1].type == IMMEDIATE || item->instruction.args[1].type == REGISTER);
@@ -1265,6 +1312,14 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
 
             break;
         }
+        case SMULL:
+            *instruction = 0b00000000110000000000000010010000;
+            *instruction |= conditional_execution_mask;
+            *instruction |= RegShift(item->instruction.args[0], 12);
+            *instruction |= RegShift(item->instruction.args[1], 16);
+            *instruction |= RegShift(item->instruction.args[2], 0);
+            *instruction |= RegShift(item->instruction.args[3], 8);
+            break;
         case SUB:
             *instruction = 0b00000000010000000000000000000000;
             *instruction |= conditional_execution_mask;
