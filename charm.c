@@ -22,7 +22,8 @@ enum OpcodeArgType {
     REGISTER = 1 << 0,
     IMMEDIATE = 1 << 1,
     LABEL = 1 << 2,
-#define ARG(i, x) ((x) << (3 * (i)))
+    REGISTER_LIST = 1 << 3,
+#define ARG(i, x) ((x) << (8 * (i)))
 #define ARG0(x) ARG(0, x)
 #define ARG1(x) ARG(1, x)
 #define ARG2(x) ARG(2, x)
@@ -40,6 +41,8 @@ enum Opcode {
     MOV,
     MUL,
     ORR,
+    POP,
+    PUSH,
     STR,
     SUB,
     SWI
@@ -59,6 +62,8 @@ struct SupportedInstruction {
     { MOV, "MOV", 2, ARG0(REGISTER) | ARG1(REG_OR_IMM) },
     { MUL, "MUL", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REGISTER) },
     { ORR, "ORR", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
+    { POP, "POP", 1, ARG0(REGISTER_LIST) },
+    { PUSH, "PUSH", 1, ARG0(REGISTER_LIST) },
     { STR, "STR", 2, ARG0(REGISTER) | ARG1(LABEL) },
     { SUB, "SUB", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
     { SWI, "SWI", 1, ARG0(IMMEDIATE) },
@@ -361,6 +366,10 @@ struct OpcodeArg {
         uint32_t register_index;
         int32_t immediate;
         const char *label;
+        struct {
+            uint8_t regs[16];
+            uint8_t count;
+        } register_list;
     };
 };
 
@@ -741,12 +750,55 @@ parse_failed:
     return false;
 }
 
+static bool parse_register_list_arg(int lineidx, const char **line, struct OpcodeArg *arg)
+{
+    struct OpcodeArg temp_reg = {0};
+    const char *start = *line;
+    uint32_t bitmask = 0;
+
+    arg->type = REGISTER_LIST;
+    arg->register_list.count = 0;
+
+    if (!consume(&start, "{"))
+        goto parse_failed;
+    
+    start = skip_whitespace(start);
+    if (parse_register_arg(&start, &temp_reg)) {
+        arg->register_list.regs[arg->register_list.count++] = temp_reg.register_index;
+        bitmask |= 1 << temp_reg.register_index;
+
+        start = skip_whitespace(start);
+        while (consume(&start, ",")) {
+            start = skip_whitespace(start);
+            if (!parse_register_arg(&start, &temp_reg)) {
+                emit_error(lineidx, "Failed to parse an argument after ','");
+                goto parse_failed;
+            }
+            if (bitmask & (1 << temp_reg.register_index)) {
+                emit_error(lineidx, "Duplicate register in list");
+                goto parse_failed;
+            }
+            arg->register_list.regs[arg->register_list.count++] = temp_reg.register_index;
+            bitmask |= 1 << temp_reg.register_index;
+            start = skip_whitespace(start);
+        }
+    }
+    
+    *line = start;
+
+    return true;
+
+parse_failed:
+    return false;
+}
+
 static bool parse_opcode_arg(int lineidx, const char **line, struct OpcodeArg *arg)
 {
     return (
         parse_register_arg(line, arg) ||
         parse_label_arg(line, arg) ||
-        parse_immediate_value_arg(lineidx, line, arg)
+        parse_immediate_value_arg(lineidx, line, arg) ||
+        parse_register_list_arg(lineidx, line, arg)
     );
 }
 
@@ -996,6 +1048,15 @@ static void add_data(struct Region *region, const uint8_t *data, size_t size)
     region->size += size;
 }
 
+static uint32_t register_list_bitmask(struct OpcodeArg *arg)
+{
+    assert(arg->type == REGISTER_LIST);
+    uint32_t bitmask = 0;
+    for (size_t i = 0; i < arg->register_list.count; i++)
+        bitmask |= 1 << arg->register_list.regs[i];
+    return bitmask;
+}
+
 static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, struct Item *item, uint32_t *instruction)
 {
     static const uint32_t IMMEDIATE_BIT = (uint32_t) 1 << 25;
@@ -1144,6 +1205,30 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
                 *instruction |= item->instruction.args[2].immediate & 0xfff;
             } else {
                 *instruction |= Rm(item->instruction.args[2]);
+            }
+            break;
+        case POP:
+            assert(item->instruction.args[0].type == REGISTER_LIST);
+            if (item->instruction.args[0].register_list.count == 1) {
+                *instruction = 0b00000100100111010000000000000100;
+                *instruction |= conditional_execution_mask;
+                *instruction |= ((uint32_t) item->instruction.args[0].register_list.regs[0] & 0xf) << 12;
+            } else {
+                *instruction = 0b00001000101111010000000000000000;
+                *instruction |= conditional_execution_mask;
+                *instruction |= register_list_bitmask(&item->instruction.args[0]);
+            }
+            break;
+        case PUSH:
+            assert(item->instruction.args[0].type == REGISTER_LIST);
+            if (item->instruction.args[0].register_list.count == 1) {
+                *instruction = 0b00000101001011010000000000000100;
+                *instruction |= conditional_execution_mask;
+                *instruction |= ((uint32_t) item->instruction.args[0].register_list.regs[0] & 0xf) << 12;
+            } else {
+                *instruction = 0b00001001001011010000000000000000;
+                *instruction |= conditional_execution_mask;
+                *instruction |= register_list_bitmask(&item->instruction.args[0]);
             }
             break;
         case STR: {
