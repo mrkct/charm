@@ -1068,15 +1068,10 @@ static uint32_t register_list_bitmask(struct OpcodeArg *arg)
 
 static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, struct Item *item, uint32_t *instruction)
 {
-    static const uint32_t IMMEDIATE_BIT = (uint32_t) 1 << 25;
     static const uint32_t Rn_PC = (uint32_t) 15 << 16;
-#define opcode(n) (((n) & 0x7f) << 21)
 #define RegShift(r, n) (((r).register_index & 0xf) << n)
-#define Rn(n) ((((n).register_index) & 0xf) << 16)
-#define Rm(n) ((((n).register_index) & 0xf) << 0)
-#define Rd(n) ((((n).register_index) & 0xf) << 12)
-#define Rt(n) ((((n).register_index) & 0xf) << 12)
-#define Imm5(i, n) (((i).immediate & 0x1f) << n)
+#define Imm5(i, n)  (((i).immediate & 0x1f) << n)
+#define Imm12(i, n) (((i).immediate & 0xfff) << n)
 
     uint32_t addr;
     uint32_t conditional_execution_mask;
@@ -1087,25 +1082,25 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
         case ADD:
             *instruction = 0b00000000100000000000000000000000;
             *instruction |= conditional_execution_mask;
-            *instruction |= Rn(item->instruction.args[1]);
-            *instruction |= Rd(item->instruction.args[0]);
+            *instruction |= RegShift(item->instruction.args[0], 12);
+            *instruction |= RegShift(item->instruction.args[1], 16);
             if (item->instruction.args[2].type == IMMEDIATE) {
-                *instruction |= IMMEDIATE_BIT;
-                *instruction |= item->instruction.args[2].immediate & 0xfff;
+                *instruction |= (uint32_t) 1 << 25;
+                *instruction |= Imm12(item->instruction.args[2], 0);
             } else {
-                *instruction |= Rm(item->instruction.args[2]);
+                *instruction |= RegShift(item->instruction.args[2], 0);
             }
             break;
         case AND:
             *instruction = 0b00000000000000000000000000000000;
             *instruction |= conditional_execution_mask;
-            *instruction |= Rn(item->instruction.args[1]);
-            *instruction |= Rd(item->instruction.args[0]);
+            *instruction |= RegShift(item->instruction.args[0], 12);
+            *instruction |= RegShift(item->instruction.args[1], 16);
             if (item->instruction.args[2].type == IMMEDIATE) {
-                *instruction |= IMMEDIATE_BIT;
-                *instruction |= item->instruction.args[2].immediate & 0xfff;
+                *instruction |= (uint32_t) 1 << 25;
+                *instruction |= Imm12(item->instruction.args[2], 0);
             } else {
-                *instruction |= Rm(item->instruction.args[2]);
+                *instruction |= RegShift(item->instruction.args[2], 0);
             }
             break;
         case ASR:
@@ -1151,12 +1146,12 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
 
             *instruction = 0b00000001010100000000000000000000;
             *instruction |= conditional_execution_mask;
-            *instruction |= Rn(item->instruction.args[0]);
+            *instruction |= RegShift(item->instruction.args[0], 16);
             if (item->instruction.args[1].type == IMMEDIATE) {
-                *instruction |= IMMEDIATE_BIT;
-                *instruction |= item->instruction.args[1].immediate & 0xfff;
+                *instruction |= (uint32_t) 1 << 25;
+                *instruction |= Imm12(item->instruction.args[1], 0);
             } else {
-                *instruction |= Rm(item->instruction.args[1]);
+                *instruction |= RegShift(item->instruction.args[1], 0);
             }
             break;
         }
@@ -1189,7 +1184,7 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
                 /* Set U=0 because the imm value must be subtracted from the register */
                 jump = -jump;
             }
-            *instruction |= Rt(item->instruction.args[0]);
+            *instruction |= RegShift(item->instruction.args[0], 12);
             *instruction |= Rn_PC;
             *instruction |= ((uint32_t) jump) & 0xfff;
 
@@ -1225,33 +1220,31 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
 
             *instruction = 0b00000001101000000000000000000000;
             *instruction |= conditional_execution_mask;
-            *instruction |= Rd(item->instruction.args[0]);
+            *instruction |= RegShift(item->instruction.args[0], 12);
             if (item->instruction.args[1].type == IMMEDIATE) {
-                *instruction |= IMMEDIATE_BIT;
-                *instruction |= item->instruction.args[1].immediate & 0xfff;
+                *instruction |= (uint32_t) 1 << 25;
+                *instruction |= Imm12(item->instruction.args[1], 0);
             } else {
-                *instruction |= Rm(item->instruction.args[1]);
+                *instruction |= RegShift(item->instruction.args[1], 0);
             }
             break;
         case MUL:
-            /* NOTE: Rn, Rm and Rd are placed in different positions
-               compared to other instructions */
             *instruction = 0b00000000000000000000000010010000;
             *instruction |= conditional_execution_mask;
-            *instruction |= (item->instruction.args[0].register_index & 0xf) << 16;
-            *instruction |= (item->instruction.args[1].register_index & 0xf) << 0;
-            *instruction |= (item->instruction.args[2].register_index & 0xf) << 8;
+            *instruction |= RegShift(item->instruction.args[0], 16);
+            *instruction |= RegShift(item->instruction.args[1], 0);
+            *instruction |= RegShift(item->instruction.args[2], 8);
             break;
         case ORR:
             *instruction = 0b00000001100000000000000000000000;
             *instruction |= conditional_execution_mask;
-            *instruction |= Rn(item->instruction.args[1]);
-            *instruction |= Rd(item->instruction.args[0]);
+            *instruction |= RegShift(item->instruction.args[0], 12);
+            *instruction |= RegShift(item->instruction.args[1], 16);
             if (item->instruction.args[2].type == IMMEDIATE) {
-                *instruction |= IMMEDIATE_BIT;
-                *instruction |= item->instruction.args[2].immediate & 0xfff;
+                *instruction |= (uint32_t) 1 << 25;
+                *instruction |= Imm12(item->instruction.args[2], 0);
             } else {
-                *instruction |= Rm(item->instruction.args[2]);
+                *instruction |= RegShift(item->instruction.args[2], 0);
             }
             break;
         case POP:
@@ -1306,8 +1299,8 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
                 /* Set U=0 because the imm value must be subtracted from the register */
                 jump = -jump;
             }
-            *instruction |= Rt(item->instruction.args[0]);
-            *instruction |= Rn_PC;
+            *instruction |= RegShift(item->instruction.args[0], 12);
+            *instruction |= 15 << 16 /* 15 is the 'pc' register */;
             *instruction |= ((uint32_t) jump) & 0xfff;
 
             break;
@@ -1323,13 +1316,13 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
         case SUB:
             *instruction = 0b00000000010000000000000000000000;
             *instruction |= conditional_execution_mask;
-            *instruction |= Rn(item->instruction.args[1]);
-            *instruction |= Rd(item->instruction.args[0]);
+            *instruction |= RegShift(item->instruction.args[0], 12);
+            *instruction |= RegShift(item->instruction.args[1], 16);
             if (item->instruction.args[2].type == IMMEDIATE) {
-                *instruction |= IMMEDIATE_BIT;
-                *instruction |= item->instruction.args[2].immediate & 0xfff;
+                *instruction |= (uint32_t) 1 << 25;
+                *instruction |= Imm12(item->instruction.args[2], 0);
             } else {
-                *instruction |= Rm(item->instruction.args[2]);
+                *instruction |= RegShift(item->instruction.args[2], 0);
             }
             break;
         case SWI:
