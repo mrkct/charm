@@ -750,7 +750,10 @@ static bool parse_immediate_value_arg(int lineidx, const char **line, struct Opc
         goto parse_failed;
 
     arg->type = IMMEDIATE;
-    if (!consume_integer(&temp, &arg->immediate)) {
+    if (*temp == '\'' && *(temp + 1) != '\0' && *(temp + 2) == '\'') {
+        arg->immediate = *(temp + 1);
+        temp += 3;
+    } else if (!consume_integer(&temp, &arg->immediate)) {
         emit_error(lineidx, "Expected an integer after '#'");
         goto parse_failed;
     }
