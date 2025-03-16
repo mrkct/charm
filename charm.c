@@ -23,6 +23,7 @@ enum OpcodeArgType {
     IMMEDIATE = 1 << 1,
     LABEL = 1 << 2,
     REGISTER_LIST = 1 << 3,
+    MEMORY_OPERAND = 1 << 4,
 #define ARG(i, x) ((x) << (8 * (i)))
 #define ARG0(x) ARG(0, x)
 #define ARG1(x) ARG(1, x)
@@ -64,7 +65,7 @@ struct SupportedInstruction {
     { B, "B", 1, ARG0(REG_OR_LABEL) },
     { BL, "BL", 1, ARG0(REG_OR_LABEL) },
     { CMP, "CMP", 2, ARG0(REGISTER) | ARG1(REG_OR_IMM) },
-    { LDR, "LDR", 2, ARG0(REGISTER) | ARG1(LABEL) },
+    { LDR, "LDR", 2, ARG0(REGISTER) | ARG1(LABEL | MEMORY_OPERAND) },
     { LSL, "LSL", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
     { LSR, "LSR", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
     { MOV, "MOV", 2, ARG0(REGISTER) | ARG1(REG_OR_IMM) },
@@ -72,7 +73,7 @@ struct SupportedInstruction {
     { ORR, "ORR", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
     { POP, "POP", 1, ARG0(REGISTER_LIST) },
     { PUSH, "PUSH", 1, ARG0(REGISTER_LIST) },
-    { STR, "STR", 2, ARG0(REGISTER) | ARG1(LABEL) },
+    { STR, "STR", 2, ARG0(REGISTER) | ARG1(LABEL | MEMORY_OPERAND) },
     { SMULL, "SMULL", 4, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REGISTER) | ARG3(REGISTER) },
     { SUB, "SUB", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
     { SWI, "SWI", 1, ARG0(IMMEDIATE) },
@@ -379,6 +380,11 @@ struct OpcodeArg {
             uint8_t regs[16];
             uint8_t count;
         } register_list;
+        struct {
+            uint32_t reg;
+            int32_t shift;
+            bool index, writeback;
+        } memory_operand;
     };
 };
 
@@ -747,11 +753,6 @@ static bool parse_immediate_value_arg(int lineidx, const char **line, struct Opc
         goto parse_failed;
     }
 
-    if (*temp != '\0' && !isspace(*temp)) {
-        emit_error(lineidx, "Unexpected character after integer");
-        goto parse_failed;
-    }
-
     *line = temp;
     return true;
 
@@ -801,13 +802,97 @@ parse_failed:
     return false;
 }
 
+static bool parse_memory_operand_arg(int lineidx, const char **line, struct OpcodeArg *arg)
+{
+    const char *start = *line;
+    struct OpcodeArg temp_reg = {0};
+    struct OpcodeArg temp_imm = {0};
+    bool index = false, writeback = false;
+
+    if (!consume(&start, "[")) {
+        goto parse_failed;
+    }
+
+    start = skip_whitespace(start);
+
+    if (!parse_register_arg(&start, &temp_reg)) {
+        emit_error(lineidx, "Expected a register after '['");
+        goto parse_failed;
+    }
+
+    start = skip_whitespace(start);
+
+    if (consume(&start, ",")) {
+        start = skip_whitespace(start);
+        if (!parse_immediate_value_arg(lineidx, &start, &temp_imm)) {
+            emit_error(lineidx, "Expected an immediate value after ','");
+            goto parse_failed;
+        }
+
+        start = skip_whitespace(start);
+
+        if (!consume(&start, "]")) {
+            emit_error(lineidx, "Expected ']' after immediate value");
+            goto parse_failed;
+        }
+
+        start = skip_whitespace(start);
+
+        index = true;
+        if (consume(&start, "!")) {
+            /* [r1, #4]! */
+            writeback = true;
+        } else {
+            /* [r1, #4] */
+            writeback = false;
+        }
+    } else {
+        if (!consume(&start, "]")) {
+            emit_error(lineidx, "Expected ']' after register");
+            goto parse_failed;
+        }
+
+        if (consume(&start, ",")) {
+            start = skip_whitespace(start);
+
+            if (!parse_immediate_value_arg(lineidx, &start, &temp_imm)) {
+                emit_error(lineidx, "Expected an immediate value after ','");
+                goto parse_failed;
+            }
+
+            /* str r2, [r1], #4 */
+            index = false;
+            writeback = true;
+        } else {
+            /* str r2, [r1] */
+            index = true;
+            writeback = false;
+            temp_imm.type = IMMEDIATE;
+            temp_imm.immediate = 0;
+        }
+    }
+
+    arg->type = MEMORY_OPERAND;
+    arg->memory_operand.reg = temp_reg.register_index;
+    arg->memory_operand.shift = temp_imm.immediate;
+    arg->memory_operand.index = index;
+    arg->memory_operand.writeback = writeback;
+    *line = start;
+
+    return true;
+
+parse_failed:
+    return false;
+}
+
 static bool parse_opcode_arg(int lineidx, const char **line, struct OpcodeArg *arg)
 {
     return (
         parse_register_arg(line, arg) ||
         parse_label_arg(line, arg) ||
         parse_immediate_value_arg(lineidx, line, arg) ||
-        parse_register_list_arg(lineidx, line, arg)
+        parse_register_list_arg(lineidx, line, arg) ||
+        parse_memory_operand_arg(lineidx, line, arg)
     );
 }
 
@@ -1068,7 +1153,6 @@ static uint32_t register_list_bitmask(struct OpcodeArg *arg)
 
 static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, struct Item *item, uint32_t *instruction)
 {
-    static const uint32_t Rn_PC = (uint32_t) 15 << 16;
 #define RegShift(r, n) (((r).register_index & 0xf) << n)
 #define Imm5(i, n)  (((i).immediate & 0x1f) << n)
 #define Imm12(i, n) (((i).immediate & 0xfff) << n)
@@ -1157,36 +1241,49 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
         }
         case LDR: {
             assert(item->instruction.args[0].type == REGISTER);
-            assert(item->instruction.args[1].type == LABEL);
+            
+            if (item->instruction.args[1].type == LABEL) {
+                int64_t jump = 0;
+                if (!hashmap_get(program->labels, item->instruction.args[1].label, &addr)) {
+                    emit_error(item->instruction.lineidx,
+                        "Label not found: %s", item->instruction.args[1].label);
+                    return false;
+                }
 
-            int64_t jump = 0;
-            if (!hashmap_get(program->labels, item->instruction.args[1].label, &addr)) {
-                emit_error(item->instruction.lineidx,
-                    "Label not found: %s", item->instruction.args[1].label);
-                return false;
+                jump = (int64_t) addr - pc;
+                if (jump <= -0x1000 || jump >= 0x1000) {
+                    emit_error(item->instruction.lineidx,
+                        "Label out of range: %s", item->instruction.args[1].label);
+                    return false;
+                }
+
+                /* 'ldr r0, <label>' is equivalent to 'ldr r0, [pc, #<distance-to-label>]' */
+                item->instruction.args[1].type = MEMORY_OPERAND;
+                item->instruction.args[1].memory_operand.reg = 15;
+                item->instruction.args[1].memory_operand.shift = (int32_t) jump;
+                item->instruction.args[1].memory_operand.index = true;
+                item->instruction.args[1].memory_operand.writeback = false;
             }
 
-            jump = (int64_t) addr - pc;
-            if (jump <= -0x1000 || jump >= 0x1000) {
-                printf("pc: %x   - label: %x\n", pc, addr);
-                emit_error(item->instruction.lineidx,
-                    "Label out of range: %s", item->instruction.args[1].label);
-                return false;
-            }
-
-            *instruction = 0b00000100000100000000000000000000;
+            assert(item->instruction.args[1].type == MEMORY_OPERAND);
+            *instruction = 0b00000100000100000000000000000000; /* LDR (immediate) */
             *instruction |= conditional_execution_mask;
-            *instruction |= 1 << 24; /* Set P=1 because we should use the imm value */
-            if (jump >= 0) {
+            if (item->instruction.args[1].memory_operand.index) {
+                *instruction |= 1 << 24;
+                if (item->instruction.args[1].memory_operand.writeback)
+                    *instruction |= 1 << 21;
+            }
+            if (item->instruction.args[1].memory_operand.shift >= 0) {
                 /* Set U=1 because the imm value must be added to the register */
                 *instruction |= 1 << 23;
             } else {
                 /* Set U=0 because the imm value must be subtracted from the register */
-                jump = -jump;
+                item->instruction.args[1].memory_operand.shift *= -1;
             }
+
             *instruction |= RegShift(item->instruction.args[0], 12);
-            *instruction |= Rn_PC;
-            *instruction |= ((uint32_t) jump) & 0xfff;
+            *instruction |= (item->instruction.args[1].memory_operand.reg & 0xf) << 16;
+            *instruction |= ((uint32_t) item->instruction.args[1].memory_operand.shift) & 0xfff;
 
             break;
         }
@@ -1273,35 +1370,49 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             break;
         case STR: {
             assert(item->instruction.args[0].type == REGISTER);
-            assert(item->instruction.args[1].type == LABEL);
 
-            int64_t jump = 0;
-            if (!hashmap_get(program->labels, item->instruction.args[1].label, &addr)) {
-                emit_error(item->instruction.lineidx,
-                    "Label not found: %s", item->instruction.args[1].label);
-                return false;
+            if (item->instruction.args[1].type == LABEL) {
+                int64_t jump = 0;
+                if (!hashmap_get(program->labels, item->instruction.args[1].label, &addr)) {
+                    emit_error(item->instruction.lineidx,
+                        "Label not found: %s", item->instruction.args[1].label);
+                    return false;
+                }
+
+                jump = (int64_t) addr - pc;
+                if (jump <= -0x1000 || jump >= 0x1000) {
+                    emit_error(item->instruction.lineidx,
+                        "Label out of range: %s", item->instruction.args[1].label);
+                    return false;
+                }
+
+                /* 'str r0, <label>' is equivalent to 'str r0, [pc, #<distance-to-label>]' */
+                item->instruction.args[1].type = MEMORY_OPERAND;
+                item->instruction.args[1].memory_operand.reg = 15;
+                item->instruction.args[1].memory_operand.shift = (int32_t) jump;
+                item->instruction.args[1].memory_operand.index = true;
+                item->instruction.args[1].memory_operand.writeback = false;
             }
 
-            jump = (int64_t) addr - pc;
-            if (jump <= -0x1000 || jump >= 0x1000) {
-                emit_error(item->instruction.lineidx,
-                    "Label out of range: %s", item->instruction.args[1].label);
-                return false;
-            }
-
-            *instruction = 0b00000100000000000000000000000000;
+            assert(item->instruction.args[1].type == MEMORY_OPERAND);
+            *instruction = 0b00000100000000000000000000000000; /* STR (immediate) */
             *instruction |= conditional_execution_mask;
-            *instruction |= 1 << 24; /* Set P=1 because we should use the imm value */
-            if (jump >= 0) {
+            if (item->instruction.args[1].memory_operand.index) {
+                *instruction |= 1 << 24;
+                if (item->instruction.args[1].memory_operand.writeback)
+                    *instruction |= 1 << 21;
+            }
+            if (item->instruction.args[1].memory_operand.shift >= 0) {
                 /* Set U=1 because the imm value must be added to the register */
                 *instruction |= 1 << 23;
             } else {
                 /* Set U=0 because the imm value must be subtracted from the register */
-                jump = -jump;
+                item->instruction.args[1].memory_operand.shift *= -1;
             }
+
             *instruction |= RegShift(item->instruction.args[0], 12);
-            *instruction |= 15 << 16 /* 15 is the 'pc' register */;
-            *instruction |= ((uint32_t) jump) & 0xfff;
+            *instruction |= (item->instruction.args[1].memory_operand.reg & 0xf) << 16;
+            *instruction |= ((uint32_t) item->instruction.args[1].memory_operand.shift) & 0xfff;
 
             break;
         }
