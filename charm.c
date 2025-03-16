@@ -39,6 +39,7 @@ enum Opcode {
     ASR,
     B,
     BL,
+    BX,
     CMP,
     LDR,
     LSL,
@@ -64,6 +65,7 @@ struct SupportedInstruction {
     { ASR, "ASR", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
     { B, "B", 1, ARG0(REG_OR_LABEL) },
     { BL, "BL", 1, ARG0(REG_OR_LABEL) },
+    { BX, "BX", 1, ARG0(REGISTER) },
     { CMP, "CMP", 2, ARG0(REGISTER) | ARG1(REG_OR_IMM) },
     { LDR, "LDR", 2, ARG0(REGISTER) | ARG1(LABEL | MEMORY_OPERAND) },
     { LSL, "LSL", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
@@ -1224,6 +1226,11 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             *instruction |= ((uint32_t) jump >> 2) & 0xffffff;
             break;
         }
+        case BX:
+            *instruction = 0b00000001001011111111111100010000;
+            *instruction |= conditional_execution_mask;
+            *instruction |= RegShift(item->instruction.args[0], 0);
+            break;
         case CMP: {
             assert(item->instruction.args[0].type == REGISTER);
             assert(item->instruction.args[1].type == REGISTER || item->instruction.args[1].type == IMMEDIATE);
