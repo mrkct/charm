@@ -758,6 +758,16 @@ static bool parse_immediate_value_arg(int lineidx, const char **line, struct Opc
         goto parse_failed;
     }
 
+    /* Negative immediate values are not a real thing: other assembler allow
+       you to use them, but will convert the instruction to a matching one
+       with a positive immediate value.
+        eg: 'add r0, r0, #-1' becomes 'sub r0, r0, #1'
+       We don't support these conversion, therefore we just deny them */
+    if (arg->immediate < 0) {
+        emit_error(lineidx, "Immediate value must be positive");
+        goto parse_failed;
+    }
+
     *line = temp;
     return true;
 
