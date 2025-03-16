@@ -42,6 +42,7 @@ enum Opcode {
     BX,
     CMP,
     LDR,
+    LDRB,
     LSL,
     LSR,
     MOV,
@@ -51,6 +52,7 @@ enum Opcode {
     PUSH,
     SMULL,
     STR,
+    STRB,
     SUB,
     SWI
 };
@@ -68,6 +70,7 @@ struct SupportedInstruction {
     { BX, "BX", 1, ARG0(REGISTER) },
     { CMP, "CMP", 2, ARG0(REGISTER) | ARG1(REG_OR_IMM) },
     { LDR, "LDR", 2, ARG0(REGISTER) | ARG1(LABEL | MEMORY_OPERAND) },
+    { LDRB, "LDRB", 2, ARG0(REGISTER) | ARG1(LABEL | MEMORY_OPERAND) },
     { LSL, "LSL", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
     { LSR, "LSR", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
     { MOV, "MOV", 2, ARG0(REGISTER) | ARG1(REG_OR_IMM) },
@@ -76,6 +79,7 @@ struct SupportedInstruction {
     { POP, "POP", 1, ARG0(REGISTER_LIST) },
     { PUSH, "PUSH", 1, ARG0(REGISTER_LIST) },
     { STR, "STR", 2, ARG0(REGISTER) | ARG1(LABEL | MEMORY_OPERAND) },
+    { STRB, "STRB", 2, ARG0(REGISTER) | ARG1(LABEL | MEMORY_OPERAND) },
     { SMULL, "SMULL", 4, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REGISTER) | ARG3(REGISTER) },
     { SUB, "SUB", 3, ARG0(REGISTER) | ARG1(REGISTER) | ARG2(REG_OR_IMM) },
     { SWI, "SWI", 1, ARG0(IMMEDIATE) },
@@ -1259,7 +1263,8 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             }
             break;
         }
-        case LDR: {
+        case LDR:
+        case LDRB: {
             assert(item->instruction.args[0].type == REGISTER);
             
             if (item->instruction.args[1].type == LABEL) {
@@ -1286,7 +1291,13 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             }
 
             assert(item->instruction.args[1].type == MEMORY_OPERAND);
-            *instruction = 0b00000100000100000000000000000000; /* LDR (immediate) */
+            
+            if (item->instruction.opcode == LDR) {
+                *instruction = 0b00000100000100000000000000000000; /* LDR (immediate) */
+            } else {
+                *instruction = 0b00000100010100000000000000000000; /* LDRB (immediate) */
+            }
+            
             *instruction |= conditional_execution_mask;
             if (item->instruction.args[1].memory_operand.index) {
                 *instruction |= 1 << 24;
@@ -1388,7 +1399,8 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
                 *instruction |= register_list_bitmask(&item->instruction.args[0]);
             }
             break;
-        case STR: {
+        case STR:
+        case STRB: {
             assert(item->instruction.args[0].type == REGISTER);
 
             if (item->instruction.args[1].type == LABEL) {
@@ -1415,7 +1427,13 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             }
 
             assert(item->instruction.args[1].type == MEMORY_OPERAND);
-            *instruction = 0b00000100000000000000000000000000; /* STR (immediate) */
+
+            if (item->instruction.opcode == STR) {
+                *instruction = 0b00000100000000000000000000000000; /* STR (immediate) */
+            } else {
+                *instruction = 0b00000100010000000000000000000000; /* STRB (immediate) */
+            }
+            
             *instruction |= conditional_execution_mask;
             if (item->instruction.args[1].memory_operand.index) {
                 *instruction |= 1 << 24;
