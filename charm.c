@@ -337,7 +337,7 @@ static bool consume_string(const char **line, char **str)
     return true;
 }
 
-static bool consume_integer(const char **line, int *integer)
+static bool consume_integer(const char **line, int32_t *integer)
 {
     const char *start = *line;
     int base;
@@ -747,24 +747,39 @@ parse_failed:
     return false;
 }
 
-static bool parse_immediate_value_arg(int lineidx, const char **line, struct OpcodeArg *arg)
+static bool parse_immediate_value(int lineidx, const char **line, int32_t *integer)
 {
     const char *temp = *line;
     if (!consume(&temp, "#"))
         goto parse_failed;
 
-    arg->type = IMMEDIATE;
     if (*temp == '\'' && *(temp + 1) != '\0' && *(temp + 2) == '\'') {
-        arg->immediate = *(temp + 1);
+        *integer = *(temp + 1);
         temp += 3;
-    } else if (!consume_integer(&temp, &arg->immediate)) {
+    } else if (!consume_integer(&temp, integer)) {
         emit_error(lineidx, "Expected an integer after '#'");
         goto parse_failed;
     }
 
-    /* Negative immediate values are not a real thing: other assembler allow
-       you to use them, but will convert the instruction to a matching one
-       with a positive immediate value.
+    *line = temp;
+    return true;
+
+parse_failed:
+    return false;
+}
+
+static bool parse_immediate_value_arg(int lineidx, const char **line, struct OpcodeArg *arg)
+{
+    const char *temp = *line;
+
+    arg->type = IMMEDIATE;
+    if (!parse_immediate_value(lineidx, &temp, &arg->immediate))
+        goto parse_failed;
+
+    /* Negative immediate values are never valid except in memory
+       operand expressions: other assembler allow you to use them,
+       but will convert the instruction to a matching one with a
+       positive immediate value.
         eg: 'add r0, r0, #-1' becomes 'sub r0, r0, #1'
        We don't support these conversion, therefore we just deny them */
     if (arg->immediate < 0) {
@@ -825,7 +840,7 @@ static bool parse_memory_operand_arg(int lineidx, const char **line, struct Opco
 {
     const char *start = *line;
     struct OpcodeArg temp_reg = {0};
-    struct OpcodeArg temp_imm = {0};
+    int32_t shift = 0;
     bool index = false, writeback = false;
 
     if (!consume(&start, "[")) {
@@ -843,7 +858,7 @@ static bool parse_memory_operand_arg(int lineidx, const char **line, struct Opco
 
     if (consume(&start, ",")) {
         start = skip_whitespace(start);
-        if (!parse_immediate_value_arg(lineidx, &start, &temp_imm)) {
+        if (!parse_immediate_value(lineidx, &start, &shift)) {
             emit_error(lineidx, "Expected an immediate value after ','");
             goto parse_failed;
         }
@@ -874,7 +889,7 @@ static bool parse_memory_operand_arg(int lineidx, const char **line, struct Opco
         if (consume(&start, ",")) {
             start = skip_whitespace(start);
 
-            if (!parse_immediate_value_arg(lineidx, &start, &temp_imm)) {
+            if (!parse_immediate_value(lineidx, &start, &shift)) {
                 emit_error(lineidx, "Expected an immediate value after ','");
                 goto parse_failed;
             }
@@ -886,14 +901,13 @@ static bool parse_memory_operand_arg(int lineidx, const char **line, struct Opco
             /* str r2, [r1] */
             index = true;
             writeback = false;
-            temp_imm.type = IMMEDIATE;
-            temp_imm.immediate = 0;
+            shift = 0;
         }
     }
 
     arg->type = MEMORY_OPERAND;
     arg->memory_operand.reg = temp_reg.register_index;
-    arg->memory_operand.shift = temp_imm.immediate;
+    arg->memory_operand.shift = shift;
     arg->memory_operand.index = index;
     arg->memory_operand.writeback = writeback;
     *line = start;
@@ -1179,6 +1193,11 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
     uint32_t addr;
     uint32_t conditional_execution_mask;
 
+    if (pc % 4 != 0) {
+        emit_error(item->instruction.lineidx, "Instruction at %08x is not word-aligned", pc);
+        return false;
+    }
+
     assert(item->type == INSTRUCTION);
     conditional_execution_mask = ((uint32_t) item->instruction.condition_flag) << 28;
     switch (item->instruction.opcode) {
@@ -1220,8 +1239,6 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             break;            
         case B:
         case BL: {
-            assert(item->instruction.args[0].type == LABEL);
-
             int64_t jump = 0;
             if (!hashmap_get(program->labels, item->instruction.args[0].label, &addr)) {
                 emit_error(item->instruction.lineidx,
@@ -1249,9 +1266,6 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             *instruction |= RegShift(item->instruction.args[0], 0);
             break;
         case CMP: {
-            assert(item->instruction.args[0].type == REGISTER);
-            assert(item->instruction.args[1].type == REGISTER || item->instruction.args[1].type == IMMEDIATE);
-
             *instruction = 0b00000001010100000000000000000000;
             *instruction |= conditional_execution_mask;
             *instruction |= RegShift(item->instruction.args[0], 16);
@@ -1265,8 +1279,6 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
         }
         case LDR:
         case LDRB: {
-            assert(item->instruction.args[0].type == REGISTER);
-            
             if (item->instruction.args[1].type == LABEL) {
                 int64_t jump = 0;
                 if (!hashmap_get(program->labels, item->instruction.args[1].label, &addr)) {
@@ -1343,9 +1355,6 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             }
             break;
         case MOV:
-            assert(item->instruction.args[0].type == REGISTER);
-            assert(item->instruction.args[1].type == IMMEDIATE || item->instruction.args[1].type == REGISTER);
-
             *instruction = 0b00000001101000000000000000000000;
             *instruction |= conditional_execution_mask;
             *instruction |= RegShift(item->instruction.args[0], 12);
@@ -1376,7 +1385,6 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             }
             break;
         case POP:
-            assert(item->instruction.args[0].type == REGISTER_LIST);
             if (item->instruction.args[0].register_list.count == 1) {
                 *instruction = 0b00000100100111010000000000000100;
                 *instruction |= conditional_execution_mask;
@@ -1388,7 +1396,6 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             }
             break;
         case PUSH:
-            assert(item->instruction.args[0].type == REGISTER_LIST);
             if (item->instruction.args[0].register_list.count == 1) {
                 *instruction = 0b00000101001011010000000000000100;
                 *instruction |= conditional_execution_mask;
@@ -1401,8 +1408,6 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             break;
         case STR:
         case STRB: {
-            assert(item->instruction.args[0].type == REGISTER);
-
             if (item->instruction.args[1].type == LABEL) {
                 int64_t jump = 0;
                 if (!hashmap_get(program->labels, item->instruction.args[1].label, &addr)) {
@@ -1475,8 +1480,6 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
             }
             break;
         case SWI:
-            assert(item->instruction.args[0].type == IMMEDIATE);
-
             *instruction = 0b00001111000000000000000000000000;
             *instruction |= conditional_execution_mask;
             *instruction |= item->instruction.args[0].immediate & 0xffffff;
