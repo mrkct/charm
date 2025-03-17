@@ -632,6 +632,43 @@ parse_failed:
     return false;
 }
 
+static bool parse_space(
+    int lineidx,
+    const char *line,
+    struct ParsedProgram *program)
+{
+    int32_t size = 0;
+
+    if (!consume(&line, "space"))
+        goto parse_failed;
+    line = skip_whitespace(line);
+
+    if (!consume_integer(&line, &size)) {
+        emit_error(lineidx, "Expected integer after '.space'");
+        goto parse_failed;
+    }
+
+    if (size < 0) {
+        emit_error(lineidx, "Expected positive integer after '.space'");
+        goto parse_failed;
+    }
+
+    struct Item item = {
+        .type = DATA,
+        .length = (size_t) size,
+        .data = {
+            .type = RAW_DATA,
+            .raw_data = NULL,
+        }
+    };
+    push_item(program, item);
+
+    return true;
+
+parse_failed:
+    return false;
+}
+
 static bool parse_preprocessor_directive(
     int lineidx,
     const char *line,
@@ -646,6 +683,7 @@ static bool parse_preprocessor_directive(
         parse_word(lineidx, line, program) ||
         parse_ascii(lineidx, line, program) ||
         parse_global(lineidx, line) ||
+        parse_space(lineidx, line, program) ||
         emit_error(lineidx, "Unknown preprocessor directive: %s", line)
     );
 
@@ -1171,7 +1209,8 @@ static void add_data(struct Region *region, const uint8_t *data, size_t size)
         region->capacity = region->size + ROUND_UP(size, SECTION_ALIGNMENT);
         region->data = mustrealloc(region->data, region->capacity);
     }
-    memcpy(region->data + region->size, data, size);
+    if (data != NULL)
+        memcpy(region->data + region->size, data, size);
     region->size += size;
 }
 
