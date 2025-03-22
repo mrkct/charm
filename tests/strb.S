@@ -9,6 +9,9 @@ before:
     strb r0, [r1, #8]
     strb r0, [r1, #16]!
     strb r0, [r1], #24
+    strb r0, [r1, r2]
+    strb r0, [r1, r2]!
+    strb r0, [r1], r2
     mov r0, r0
     mov r0, r0
     mov r0, r0

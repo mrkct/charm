@@ -388,6 +388,8 @@ struct OpcodeArg {
         } register_list;
         struct {
             uint32_t reg;
+            bool has_offset_reg;
+            uint32_t offset_reg;
             int32_t shift;
             bool index, writeback;
         } memory_operand;
@@ -714,7 +716,7 @@ parse_failed:
     return false;
 }
 
-static bool parse_register_arg(const char **line, struct OpcodeArg *arg)
+static bool parse_register(const char **line, uint32_t *register_index)
 {
     char *iden = NULL;
     bool found = false;
@@ -749,8 +751,7 @@ static bool parse_register_arg(const char **line, struct OpcodeArg *arg)
     };
     for (size_t i = 0; i < ARRAY_SIZE(REGISTERS); i++) {
         if (strcmp(iden, REGISTERS[i].name) == 0) {
-            arg->type = REGISTER;
-            arg->register_index = REGISTERS[i].idx;
+            *register_index = REGISTERS[i].idx;
             found = true;
             break;
         }
@@ -765,6 +766,15 @@ static bool parse_register_arg(const char **line, struct OpcodeArg *arg)
 parse_failed:
     free(iden);
     return false;
+}
+
+static bool parse_register_arg(const char **line, struct OpcodeArg *arg)
+{
+    if (!parse_register(line, &arg->register_index))
+        return false;
+
+    arg->type = REGISTER;
+    return true;
 }
 
 static bool parse_label_arg(const char **line, struct OpcodeArg *arg)
@@ -877,9 +887,10 @@ parse_failed:
 static bool parse_memory_operand_arg(int lineidx, const char **line, struct OpcodeArg *arg)
 {
     const char *start = *line;
-    struct OpcodeArg temp_reg = {0};
+    uint32_t base_reg = 0;
+    uint32_t offset_reg = 0;
     int32_t shift = 0;
-    bool index = false, writeback = false;
+    bool has_offset_reg = false, index = false, writeback = false;
 
     if (!consume(&start, "[")) {
         goto parse_failed;
@@ -887,7 +898,7 @@ static bool parse_memory_operand_arg(int lineidx, const char **line, struct Opco
 
     start = skip_whitespace(start);
 
-    if (!parse_register_arg(&start, &temp_reg)) {
+    if (!parse_register(&start, &base_reg)) {
         emit_error(lineidx, "Expected a register after '['");
         goto parse_failed;
     }
@@ -896,7 +907,12 @@ static bool parse_memory_operand_arg(int lineidx, const char **line, struct Opco
 
     if (consume(&start, ",")) {
         start = skip_whitespace(start);
-        if (!parse_immediate_value(lineidx, &start, &shift)) {
+
+        if (parse_register(&start, &offset_reg)) {
+            has_offset_reg = true;
+        } else if (parse_immediate_value(lineidx, &start, &shift)) {
+            has_offset_reg = false;
+        } else {
             emit_error(lineidx, "Expected an immediate value after ','");
             goto parse_failed;
         }
@@ -927,7 +943,11 @@ static bool parse_memory_operand_arg(int lineidx, const char **line, struct Opco
         if (consume(&start, ",")) {
             start = skip_whitespace(start);
 
-            if (!parse_immediate_value(lineidx, &start, &shift)) {
+            if (parse_register(&start, &offset_reg)) {
+                has_offset_reg = true;
+            } else if (parse_immediate_value(lineidx, &start, &shift)) {
+                has_offset_reg = false;
+            } else {
                 emit_error(lineidx, "Expected an immediate value after ','");
                 goto parse_failed;
             }
@@ -944,10 +964,12 @@ static bool parse_memory_operand_arg(int lineidx, const char **line, struct Opco
     }
 
     arg->type = MEMORY_OPERAND;
-    arg->memory_operand.reg = temp_reg.register_index;
+    arg->memory_operand.reg = base_reg;
+    arg->memory_operand.offset_reg = offset_reg;
     arg->memory_operand.shift = shift;
     arg->memory_operand.index = index;
     arg->memory_operand.writeback = writeback;
+    arg->memory_operand.has_offset_reg = has_offset_reg;
     *line = start;
 
     return true;
@@ -1339,14 +1361,21 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
                 item->instruction.args[1].memory_operand.shift = (int32_t) jump;
                 item->instruction.args[1].memory_operand.index = true;
                 item->instruction.args[1].memory_operand.writeback = false;
+                item->instruction.args[1].memory_operand.has_offset_reg = false;
             }
 
             assert(item->instruction.args[1].type == MEMORY_OPERAND);
             
             if (item->instruction.opcode == LDR) {
-                *instruction = 0b00000100000100000000000000000000; /* LDR (immediate) */
+                if (!item->instruction.args[1].memory_operand.has_offset_reg)
+                    *instruction = 0b00000100000100000000000000000000; /* LDR (immediate) */
+                else
+                    *instruction = 0b00000110000100000000000000000000; /* LDR (register) */
             } else {
-                *instruction = 0b00000100010100000000000000000000; /* LDRB (immediate) */
+                if (!item->instruction.args[1].memory_operand.has_offset_reg)
+                    *instruction = 0b00000100010100000000000000000000; /* LDRB (immediate) */
+                else
+                    *instruction = 0b00000110010100000000000000000000; /* LDRB (register) */
             }
             
             *instruction |= conditional_execution_mask;
@@ -1365,7 +1394,11 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
 
             *instruction |= RegShift(item->instruction.args[0], 12);
             *instruction |= (item->instruction.args[1].memory_operand.reg & 0xf) << 16;
-            *instruction |= ((uint32_t) item->instruction.args[1].memory_operand.shift) & 0xfff;
+            if (item->instruction.args[1].memory_operand.has_offset_reg) {
+                *instruction |= (item->instruction.args[1].memory_operand.offset_reg & 0xf) << 0;
+            } else {
+                *instruction |= ((uint32_t) item->instruction.args[1].memory_operand.shift) & 0xfff;
+            }
 
             break;
         }
@@ -1468,14 +1501,21 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
                 item->instruction.args[1].memory_operand.shift = (int32_t) jump;
                 item->instruction.args[1].memory_operand.index = true;
                 item->instruction.args[1].memory_operand.writeback = false;
+                item->instruction.args[1].memory_operand.has_offset_reg = false;
             }
 
             assert(item->instruction.args[1].type == MEMORY_OPERAND);
 
             if (item->instruction.opcode == STR) {
-                *instruction = 0b00000100000000000000000000000000; /* STR (immediate) */
+                if (!item->instruction.args[1].memory_operand.has_offset_reg)
+                    *instruction = 0b00000100000000000000000000000000; /* STR (immediate) */
+                else
+                    *instruction = 0b00000110000000000000000000000000; /* STR (register) */
             } else {
-                *instruction = 0b00000100010000000000000000000000; /* STRB (immediate) */
+                if (!item->instruction.args[1].memory_operand.has_offset_reg)
+                    *instruction = 0b00000100010000000000000000000000; /* STRB (immediate) */
+                else
+                    *instruction = 0b00000110010000000000000000000000; /* STRB (register) */
             }
             
             *instruction |= conditional_execution_mask;
@@ -1494,7 +1534,11 @@ static bool codegen_instruction(struct ParsedProgram *program, uint32_t pc, stru
 
             *instruction |= RegShift(item->instruction.args[0], 12);
             *instruction |= (item->instruction.args[1].memory_operand.reg & 0xf) << 16;
-            *instruction |= ((uint32_t) item->instruction.args[1].memory_operand.shift) & 0xfff;
+            if (item->instruction.args[1].memory_operand.has_offset_reg) {
+                *instruction |= (item->instruction.args[1].memory_operand.offset_reg & 0xf) << 0;
+            } else {
+                *instruction |= ((uint32_t) item->instruction.args[1].memory_operand.shift) & 0xfff;
+            }
 
             break;
         }
