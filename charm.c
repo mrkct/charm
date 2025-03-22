@@ -470,7 +470,7 @@ static void push_item(struct ParsedProgram *program, struct Item item)
             section->items_capacity * sizeof(*section->items));
     }
     section->items[section->items_length++] = item;
-    section->size += ROUND_UP(item.length, 4);
+    section->size += item.length;
 }
 
 static bool parse_section(int lineidx, const char *line, struct ParsedProgram *program)
@@ -1131,6 +1131,10 @@ static bool parse_instruction(int lineidx, const char *line, struct ParsedProgra
                 [3] = args[3],
             } }
     };
+    if (program->sections[program->sections_length - 1].size % 4 != 0) {
+        emit_error(lineidx, "Instruction would end up misaligned");
+        return false;
+    }
     push_item(program, item);
     free(instruction_name);
 
