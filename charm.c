@@ -329,9 +329,29 @@ static bool consume_string(const char **line, char **str)
 
     // Calculate the length of the string (excluding quotes)
     size_t length = start - *line - 1;
-    *str = mustmalloc(length + 1);
-    strncpy(*str, *line + 1, length);
-    (*str)[length] = '\0';
+    *str = mustmalloc(length + 1); // Allocate max possible size (actual might be smaller due to escape sequences)
+    
+    // Copy characters with escape sequence handling
+    const char *src = *line + 1;
+    char *dst = *str;
+    while (src < start) {
+        if (*src == '\\' && src + 1 < start) {
+            src++; // Skip the backslash
+            switch (*src) {
+                case 'n': *dst++ = '\n'; break;
+                case 't': *dst++ = '\t'; break;
+                case 'r': *dst++ = '\r'; break;
+                case '0': *dst++ = '\0'; break;
+                case '\\': *dst++ = '\\'; break;
+                case '"': *dst++ = '"'; break;
+                default: *dst++ = *src; break; // Unknown escape sequence, just copy the character
+            }
+        } else {
+            *dst++ = *src;
+        }
+        src++;
+    }
+    *dst = '\0'; // Null-terminate the string
 
     *line = start + 1;
     return true;
