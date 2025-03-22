@@ -1630,6 +1630,8 @@ static void assemble_obj(struct ObjectCode *object, int fd)
 
 static void assemble_elf(struct ObjectCode *object, int fd)
 {
+    uint8_t zeros[4096] = { 0 };
+
     Elf32_Ehdr hdr = {
         .e_ident = {
             ELFMAG0, ELFMAG1, ELFMAG2, ELFMAG3,
@@ -1672,17 +1674,20 @@ static void assemble_elf(struct ObjectCode *object, int fd)
             .p_align = SECTION_ALIGNMENT,
         };
         write(fd, &phdr_hdr, sizeof(phdr_hdr));
-        next_offset += region->size;
+        next_offset += ROUND_UP(region->size, SECTION_ALIGNMENT);
     }
 
-    uint8_t zeros[4096] = { 0 };
-    size_t padding = 4096 - (lseek(fd, 0, SEEK_CUR) % 4096);
-    if (padding < 4096)
+    
+    size_t padding = SECTION_ALIGNMENT - (lseek(fd, 0, SEEK_CUR) % SECTION_ALIGNMENT);
+    if (padding > 0)
         write(fd, zeros, padding);
 
     for (size_t i = 0; i < object->regions_length; i++) {
         struct Region *region = &object->regions[i];
         write(fd, region->data, region->size);
+        padding = ROUND_UP(region->size, 4096) - region->size;
+        if (padding > 0)
+            write(fd, zeros, padding);
     }
 }
 
