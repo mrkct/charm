@@ -12,7 +12,7 @@ dependencies other than the standard C library.
 The following commands will assemble the `hello.S` into a static ELF
 executable that can run on an ARM Linux machine:
 
-    ./charm hello.S hello
+    ./charm samples/hello.S hello
     ./hello
     Hello, world!
 
@@ -44,7 +44,7 @@ charm is suitable for you use case or you can treat this as a potential
 list of improvements you could contribute.
 
 **Very few instructions are implemented**:
-Charm implements less than 20 instructions, and some of them are not
+Charm implements around 20 instructions, and some of them are not
 even fully implemented.
 
 **Not all invalid instructions are rejected**:

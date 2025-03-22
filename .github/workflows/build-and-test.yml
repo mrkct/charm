@@ -16,11 +16,11 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install arm-none-eabi-gcc
+      - name: Install dependencies for tests
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y gcc-arm-none-eabi
-      
+          sudo apt-get install -y gcc-arm-none-eabi qemu-user
+
       - name: Build and test
         run: |
           make clean
