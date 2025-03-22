@@ -30,3 +30,5 @@ clean:
 	$(RM) -f charm
 	$(RM) -f tests/*.elf
 	$(RM) -f tests/*.bin
+	$(RM) -f samples/*.elf
+	$(RM) -f samples/*.txt

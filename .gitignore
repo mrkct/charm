@@ -1,4 +1,6 @@
 charm
 *.bin
 *.elf
-hello
+*.txt
+*.elf
+*.o
