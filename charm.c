@@ -1257,6 +1257,8 @@ static void add_data(struct Region *region, const uint8_t *data, size_t size)
     }
     if (data != NULL)
         memcpy(region->data + region->size, data, size);
+    else
+        memset(region->data + region->size, 0, size);
     region->size += size;
 }
 
