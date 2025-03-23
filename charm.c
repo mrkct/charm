@@ -246,10 +246,26 @@ static bool emit_error(int lineidx, const char *fmt, ...)
     return false;
 }
 
-static const char *skip_whitespace(const char *line)
+static const char *skip_whitespace_and_comments(const char *line)
 {
-    while (*line && isspace(*line))
-        line++;
+    do {
+        while (isspace(*line))
+            line++;
+
+        if (*line == '/' && *(line +1) == '*') {
+            while (*line && (*line != '*' || *(line + 1) != '/'))
+                line++;
+            if (*line == '*' && *(line + 1) == '/')
+                line += 2;
+        }
+    } while (isspace(*line) || (*line == '/' && *(line + 1) == '*'));
+
+    // Too many ways of having single line comments!
+    if (*line == ';' || *line == '@' || (*line == '/' && *(line + 1) == '/')) {
+        while (*line && *line != '\n')
+            line++;
+    }
+
     return line;
 }
 
@@ -473,32 +489,34 @@ static void push_item(struct ParsedProgram *program, struct Item item)
     section->size += item.length;
 }
 
-static bool parse_section(int lineidx, const char *line, struct ParsedProgram *program)
+static bool parse_section(int lineidx, const char **line, struct ParsedProgram *program)
 {
     char *section_name = NULL;
     char *flags = NULL;
 
-    line = skip_whitespace(line);
-    if (!consume(&line, "section"))
-        goto parse_failed;
-    line = skip_whitespace(line);
+    const char *start = *line;
 
-    if (!consume_identifier(&line, &section_name)) {
+    start = skip_whitespace_and_comments(start);
+    if (!consume(&start, "section"))
+        goto parse_failed;
+    start = skip_whitespace_and_comments(start);
+
+    if (!consume_identifier(&start, &section_name)) {
         emit_error(lineidx,
-            "Expected section name, found '%s' instead", line);
+            "Expected section name, found '%s' instead", start);
         goto parse_failed;
     }
 
-    line = skip_whitespace(line);
-    if (!consume(&line, ","))
+    start = skip_whitespace_and_comments(start);
+    if (!consume(&start, ","))
         goto parse_failed;
-    line = skip_whitespace(line);
+    start = skip_whitespace_and_comments(start);
 
-    if (!consume_string(&line, &flags)) {
+    if (!consume_string(&start, &flags)) {
         emit_error(lineidx,
             "Expected section flags (eg: \"arx\"), "
             "found '%s' instead",
-            line);
+            start);
         goto parse_failed;
     }
 
@@ -534,6 +552,7 @@ static bool parse_section(int lineidx, const char *line, struct ParsedProgram *p
     section->items_length = 0;
     section->items_capacity = 0;
 
+    *line = start;
     return true;
 
 parse_failed:
@@ -542,23 +561,25 @@ parse_failed:
     return false;
 }
 
-static bool parse_global(int lineidx, const char *line)
+static bool parse_global(int lineidx, const char **line)
 {
     char *label = NULL;
+    const char *start = *line;
 
     /* We don't do anything with .global statements, we only parse them to
        ignore them because they're present in inputs */
 
-    if (!consume(&line, "global"))
+    if (!consume(&start, "global"))
         goto parse_failed;
 
-    line = skip_whitespace(line);
-    if (!consume_identifier(&line, &label)) {
-        emit_error(lineidx, "Expected label name, found '%s' instead", line);
+    start = skip_whitespace_and_comments(start);
+    if (!consume_identifier(&start, &label)) {
+        emit_error(lineidx, "Expected label name, found '%s' instead", start);
         goto parse_failed;
     }
 
     free(label);
+    *line = start;
     return true;
 
 parse_failed:
@@ -566,17 +587,18 @@ parse_failed:
     return false;
 }
 
-static bool parse_word(int lineidx, const char *line, struct ParsedProgram *program)
+static bool parse_word(int lineidx, const char **line, struct ParsedProgram *program)
 {
     char *label = NULL;
     int value;
+    const char *start = *line;
 
-    if (!consume(&line, "word"))
+    if (!consume(&start, "word"))
         goto parse_failed;
 
-    line = skip_whitespace(line);
+    start = skip_whitespace_and_comments(start);
 
-    if (consume_integer(&line, &value)) {
+    if (consume_integer(&start, &value)) {
 
         uint8_t *data = mustmalloc(4);
         data[0] = (uint32_t) value;
@@ -593,7 +615,7 @@ static bool parse_word(int lineidx, const char *line, struct ParsedProgram *prog
             }
         };
         push_item(program, item);
-    } else if (consume_identifier(&line, &label)) {
+    } else if (consume_identifier(&start, &label)) {
         struct Item item = {
             .type = DATA,
             .length = 4,
@@ -604,10 +626,11 @@ static bool parse_word(int lineidx, const char *line, struct ParsedProgram *prog
         };
         push_item(program, item);
     } else {
-        emit_error(lineidx, "Expected integer or label name, found '%s' instead", line);
+        emit_error(lineidx, "Expected integer or label name, found '%s' instead", start);
         goto parse_failed;
     }
 
+    *line = start;
     return true;
 
 parse_failed:
@@ -617,22 +640,23 @@ parse_failed:
 
 static bool parse_ascii(
     int lineidx,
-    const char *line,
+    const char **line,
     struct ParsedProgram *program)
 {
     char *string = NULL;
     bool include_zero_term = true;
+    const char *start = *line;
 
-    if (consume(&line, "ascii")) {
+    if (consume(&start, "ascii")) {
         include_zero_term = false;
-    } else if (consume(&line, "asciz") || consume(&line, "string")) {
+    } else if (consume(&start, "asciz") || consume(&start, "string")) {
         include_zero_term = true;
     } else {
         goto parse_failed;
     }
-    line = skip_whitespace(line);
+    start = skip_whitespace_and_comments(start);
 
-    if (!consume_string(&line, &string)) {
+    if (!consume_string(&start, &string)) {
         emit_error(lineidx, "Invalid string literal");
         goto parse_failed;
     }
@@ -646,6 +670,7 @@ static bool parse_ascii(
         }
     };
     push_item(program, item);
+    *line = start;
 
     return true;
 
@@ -656,16 +681,17 @@ parse_failed:
 
 static bool parse_space(
     int lineidx,
-    const char *line,
+    const char **line,
     struct ParsedProgram *program)
 {
     int32_t size = 0;
+    const char *start = *line;
 
-    if (!consume(&line, "space"))
+    if (!consume(&start, "space"))
         goto parse_failed;
-    line = skip_whitespace(line);
+    start = skip_whitespace_and_comments(start);
 
-    if (!consume_integer(&line, &size)) {
+    if (!consume_integer(&start, &size)) {
         emit_error(lineidx, "Expected integer after '.space'");
         goto parse_failed;
     }
@@ -684,6 +710,7 @@ static bool parse_space(
         }
     };
     push_item(program, item);
+    *line = start;
 
     return true;
 
@@ -693,34 +720,42 @@ parse_failed:
 
 static bool parse_preprocessor_directive(
     int lineidx,
-    const char *line,
+    const char **line,
     struct ParsedProgram *program)
 {
-    line = skip_whitespace(line);
-    if (!consume(&line, "."))
+    const char *start = *line;
+
+    start = skip_whitespace_and_comments(start);
+    if (!consume(&start, "."))
         goto parse_failed;
 
-    return (
-        parse_section(lineidx, line, program) ||
-        parse_word(lineidx, line, program) ||
-        parse_ascii(lineidx, line, program) ||
-        parse_global(lineidx, line) ||
-        parse_space(lineidx, line, program) ||
-        emit_error(lineidx, "Unknown preprocessor directive: %s", line)
-    );
+    if (!(
+        parse_section(lineidx, &start, program) ||
+        parse_word(lineidx, &start, program) ||
+        parse_ascii(lineidx, &start, program) ||
+        parse_global(lineidx, &start) ||
+        parse_space(lineidx, &start, program)
+    )) {
+        emit_error(lineidx, "Unknown preprocessor directive: %s", line);
+        goto parse_failed;
+    }
+
+    *line = start;
+    return true;
 
 parse_failed:
     return false;
 }
 
-static bool parse_label_decl(int lineidx, const char *line, struct ParsedProgram *program)
+static bool parse_label_decl(int lineidx, const char **line, struct ParsedProgram *program)
 {
+    const char *start = *line;
     char *label = NULL;
 
-    line = skip_whitespace(line);
-    if (!consume_identifier(&line, &label))
+    start = skip_whitespace_and_comments(start);
+    if (!consume_identifier(&start, &label))
         goto parse_failed;
-    if (!consume(&line, ":"))
+    if (!consume(&start, ":"))
         goto parse_failed;
 
     struct Section *section = &program->sections[program->sections_length - 1];
@@ -729,6 +764,8 @@ static bool parse_label_decl(int lineidx, const char *line, struct ParsedProgram
         goto parse_failed;
     }
     hashmap_insert(program->labels, label, section->start + section->size);
+    
+    *line = start;
     return true;
 
 parse_failed:
@@ -874,14 +911,14 @@ static bool parse_register_list_arg(int lineidx, const char **line, struct Opcod
     if (!consume(&start, "{"))
         goto parse_failed;
     
-    start = skip_whitespace(start);
+    start = skip_whitespace_and_comments(start);
     if (parse_register_arg(&start, &temp_reg)) {
         arg->register_list.regs[arg->register_list.count++] = temp_reg.register_index;
         bitmask |= 1 << temp_reg.register_index;
 
-        start = skip_whitespace(start);
+        start = skip_whitespace_and_comments(start);
         while (consume(&start, ",")) {
-            start = skip_whitespace(start);
+            start = skip_whitespace_and_comments(start);
             if (!parse_register_arg(&start, &temp_reg)) {
                 emit_error(lineidx, "Failed to parse an argument after ','");
                 goto parse_failed;
@@ -892,10 +929,13 @@ static bool parse_register_list_arg(int lineidx, const char **line, struct Opcod
             }
             arg->register_list.regs[arg->register_list.count++] = temp_reg.register_index;
             bitmask |= 1 << temp_reg.register_index;
-            start = skip_whitespace(start);
+            start = skip_whitespace_and_comments(start);
         }
     }
-    
+
+    if (!consume(&start, "}"))
+        goto parse_failed;
+
     *line = start;
 
     return true;
@@ -916,17 +956,17 @@ static bool parse_memory_operand_arg(int lineidx, const char **line, struct Opco
         goto parse_failed;
     }
 
-    start = skip_whitespace(start);
+    start = skip_whitespace_and_comments(start);
 
     if (!parse_register(&start, &base_reg)) {
         emit_error(lineidx, "Expected a register after '['");
         goto parse_failed;
     }
 
-    start = skip_whitespace(start);
+    start = skip_whitespace_and_comments(start);
 
     if (consume(&start, ",")) {
-        start = skip_whitespace(start);
+        start = skip_whitespace_and_comments(start);
 
         if (parse_register(&start, &offset_reg)) {
             has_offset_reg = true;
@@ -937,14 +977,14 @@ static bool parse_memory_operand_arg(int lineidx, const char **line, struct Opco
             goto parse_failed;
         }
 
-        start = skip_whitespace(start);
+        start = skip_whitespace_and_comments(start);
 
         if (!consume(&start, "]")) {
             emit_error(lineidx, "Expected ']' after immediate value");
             goto parse_failed;
         }
 
-        start = skip_whitespace(start);
+        start = skip_whitespace_and_comments(start);
 
         index = true;
         if (consume(&start, "!")) {
@@ -961,7 +1001,7 @@ static bool parse_memory_operand_arg(int lineidx, const char **line, struct Opco
         }
 
         if (consume(&start, ",")) {
-            start = skip_whitespace(start);
+            start = skip_whitespace_and_comments(start);
 
             if (parse_register(&start, &offset_reg)) {
                 has_offset_reg = true;
@@ -1078,7 +1118,7 @@ static bool validate_instruction_args(int lineidx, struct SupportedInstruction *
     return true;
 }
 
-static bool parse_instruction(int lineidx, const char *line, struct ParsedProgram *program)
+static bool parse_instruction(int lineidx, const char **line, struct ParsedProgram *program)
 {
     struct OpcodeArg args[4] = { 0 };
     int argc = 0;
@@ -1086,27 +1126,29 @@ static bool parse_instruction(int lineidx, const char *line, struct ParsedProgra
     uint32_t condition_flag = 0;
     struct SupportedInstruction *instruction = NULL;
 
-    if (!consume_identifier(&line, &instruction_name))
+    const char *start = *line;
+
+    if (!consume_identifier(&start, &instruction_name))
         goto parse_failed;
 
-    line = skip_whitespace(line);
-    if (parse_opcode_arg(lineidx, &line, &args[argc])) {
+    start = skip_whitespace_and_comments(start);
+    if (parse_opcode_arg(lineidx, &start, &args[argc])) {
         argc++;
 
-        line = skip_whitespace(line);
-        while (consume(&line, ",")) {
+        start = skip_whitespace_and_comments(start);
+        while (consume(&start, ",")) {
             if (argc >= 4) {
                 emit_error(lineidx, "Too many arguments");
                 goto parse_failed;
             }
 
-            line = skip_whitespace(line);
-            if (!parse_opcode_arg(lineidx, &line, &args[argc])) {
+            start = skip_whitespace_and_comments(start);
+            if (!parse_opcode_arg(lineidx, &start, &args[argc])) {
                 emit_error(lineidx, "Failed to parse an argument after ','");
                 goto parse_failed;
             }
             argc++;
-            line = skip_whitespace(line);
+            start = skip_whitespace_and_comments(start);
         }
     }
 
@@ -1137,6 +1179,7 @@ static bool parse_instruction(int lineidx, const char *line, struct ParsedProgra
     }
     push_item(program, item);
     free(instruction_name);
+    *line = start;
 
     return true;
 
@@ -1145,26 +1188,29 @@ parse_failed:
     return false;
 }
 
-static bool parse_line(int lineidx, char *line, struct ParsedProgram *program)
+static bool parse_line(int lineidx, const char *line, struct ParsedProgram *program)
 {
-    // Trim comments
-    for (char *c = line; *c && *(c + 1); c++) {
-        if (*c == '/' && *(c + 1) == '/') {
-            *c = '\0';
+    do {
+        line = skip_whitespace_and_comments(line);
+        if (!parse_label_decl(lineidx, &line, program))
             break;
-        }
-    }
+    } while(*line != '\0');
 
-    // Empty lines are not an error
-    line = (char *) skip_whitespace(line);
     if (*line == '\0')
         return true;
 
-    return (
-        parse_preprocessor_directive(lineidx, line, program) ||
-        parse_label_decl(lineidx, line, program) ||
-        parse_instruction(lineidx, line, program)
-    );
+    if (!(parse_preprocessor_directive(lineidx, &line, program) || parse_instruction(lineidx, &line, program))) {
+        emit_error(lineidx, "Failed to parse line (expected either an instruction or a preprocessor directive)");
+        return false;
+    }
+
+    line = skip_whitespace_and_comments(line);
+    if (*line != '\0') {
+        emit_error(lineidx, "Left-over input: '%s'", line);
+        return false;
+    }
+
+    return true;
 }
 
 static bool parse(char *source, uint32_t startaddr, struct ParsedProgram *program)
